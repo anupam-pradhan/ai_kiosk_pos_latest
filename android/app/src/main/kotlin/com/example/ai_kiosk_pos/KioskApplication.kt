@@ -69,15 +69,18 @@ class KioskApplication : Application() {
       }
     }.onFailure { Log.w(TAG, "Error cleaning databases: ${it.message}") }
 
-    // 2. Delete ALL SharedPreferences files EXCEPT our own tracker.
+    // 2. Delete Stripe-related SharedPreferences files EXCEPT our own
+    // tracker AND Flutter's shared_preferences (preserves kiosk mode selection).
     // The corrupted Tink keyset is stored in SharedPrefs with an
-    // unpredictable name, so we must wipe everything to be safe.
+    // unpredictable name, so we must wipe everything else to be safe.
     runCatching {
       // dataDir is available since API 24 (our minSdk is 26)
       val prefsDir = File(dataDir, "shared_prefs")
       if (prefsDir.exists()) {
         prefsDir.listFiles()?.forEach { file ->
-          if (!file.name.startsWith(PREFS_NAME)) {
+          val name = file.name
+          // Keep our tracker prefs and Flutter's shared_preferences (kiosk mode, etc.)
+          if (!name.startsWith(PREFS_NAME) && !name.startsWith("FlutterSharedPreferences")) {
             if (file.delete()) {
               Log.i(TAG, "Deleted prefs '${file.name}'")
               cleanedCount++

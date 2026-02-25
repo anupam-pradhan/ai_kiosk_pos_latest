@@ -5,9 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.LocationManager
-import android.net.Uri
 import android.nfc.NfcAdapter
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -25,7 +23,6 @@ import com.stripe.stripeterminal.external.callable.ConnectionTokenProvider
 import com.stripe.stripeterminal.external.callable.DiscoveryListener
 import com.stripe.stripeterminal.external.callable.PaymentIntentCallback
 import com.stripe.stripeterminal.external.callable.ReaderCallback
-import com.stripe.stripeterminal.external.callable.TapToPayReaderListener
 import com.stripe.stripeterminal.external.callable.TerminalListener
 import com.stripe.stripeterminal.external.models.CollectConfiguration
 import com.stripe.stripeterminal.external.models.ConnectionConfiguration
@@ -51,9 +48,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -244,14 +238,6 @@ class MainActivity : FlutterActivity(), TerminalListener {
       )
     }
   }
-
-  /**
-   * Returns a stable device identifier. Used as fallback when the discovered
-   * reader has no serial number, preventing the Stripe API
-   * "empty string for device_serial_number" error.
-   */
-  private fun deviceId(): String =
-    Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: Build.MODEL
 
   /**
    * Retry connection with exponential backoff.
@@ -455,27 +441,10 @@ class MainActivity : FlutterActivity(), TerminalListener {
 
   private fun ensureTerminalInitialized(url: String, onReady: ()->Unit) {
     if (!Terminal.isInitialized()) {
-      // Sunmi & some OEMs return "" for Build.SERIAL on API 33+.
-      // The Stripe SDK sends that empty string as device_serial_number,
-      // which the Stripe API rejects. Setting the system property gives
-      // the SDK a non-empty fallback.
-      try {
-        val serial = Build.SERIAL  // may be "unknown" or ""
-        if (serial.isNullOrBlank() || serial == "unknown") {
-          val fallbackId = deviceId()
-          Log.d("StripeTerminal", "Build.SERIAL is '$serial', injecting fallback id: $fallbackId")
-          System.setProperty("ro.serialno", fallbackId)
-        }
-      } catch (e: Exception) {
-        Log.w("StripeTerminal", "Could not check/set device serial: ${e.message}")
-      }
       try {
         Terminal.initTerminal(applicationContext, LogLevel.VERBOSE, createTokenProvider(url), this)
       } catch (e: Exception) {
         Log.e("StripeTerminal", "Failed to initialize terminal: ${e.message}")
-        // We can't easily propagate this error up from here since onReady is void,
-        // but it prevents a hard crash. The subsequent calls will fail gracefully
-        // because terminal is not initialized.
       }
     }
     onReady()

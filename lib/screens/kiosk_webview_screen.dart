@@ -49,7 +49,6 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   final StreamController<Map<String, dynamic>> _ttpProgressController =
       StreamController<Map<String, dynamic>>.broadcast();
 
-
   static const Set<String> _fallbackEligibleCodes = {
     "UNSUPPORTED_OS",
     "UNSUPPORTED_DEVICE",
@@ -366,7 +365,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     final progressSub = _ttpProgressController.stream.listen((event) {
       if (isDone || dialogSetState == null) return;
       final step = event['step'] as int? ?? currentStep;
-      final msg = event['message'] as String? ?? stepMessages[math.min(step, stepMessages.length - 1)];
+      final msg =
+          event['message'] as String? ??
+          stepMessages[math.min(step, stepMessages.length - 1)];
       dialogSetState!(() {
         currentStep = math.min(step, stepMessages.length - 1);
         currentMessage = msg;
@@ -378,16 +379,16 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     final fallbackTimer = Stream.periodic(const Duration(seconds: 8), (i) => i)
         .take(stepMessages.length - 1)
         .listen((i) {
-      if (isDone || dialogSetState == null) return;
-      final nextStep = i + 1;
-      if (nextStep > currentStep) {
-        // Only advance if native hasn't already moved us past this step
-        dialogSetState!(() {
-          currentStep = nextStep;
-          currentMessage = stepMessages[nextStep];
+          if (isDone || dialogSetState == null) return;
+          final nextStep = i + 1;
+          if (nextStep > currentStep) {
+            // Only advance if native hasn't already moved us past this step
+            dialogSetState!(() {
+              currentStep = nextStep;
+              currentMessage = stepMessages[nextStep];
+            });
+          }
         });
-      }
-    });
 
     // Show compact dialog (matching existing _buildLoadingOverlay style)
     showDialog<void>(
@@ -402,7 +403,10 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
             elevation: 0,
             child: Center(
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 16,
+                ),
                 decoration: BoxDecoration(
                   gradient: const LinearGradient(
                     colors: [Color(0xFFFFF2E9), Color(0xFFFFF8F4)],
@@ -429,7 +433,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           height: 20,
                           child: CircularProgressIndicator(
                             strokeWidth: 2.5,
-                            valueColor: AlwaysStoppedAnimation<Color>(brandColor),
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              brandColor,
+                            ),
                           ),
                         ),
                         const SizedBox(width: 10),
@@ -455,7 +461,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                       child: LinearProgressIndicator(
                         value: (currentStep + 1) / stepMessages.length,
                         backgroundColor: const Color(0xFFF5D8C9),
-                        valueColor: const AlwaysStoppedAnimation<Color>(brandColor),
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                          brandColor,
+                        ),
                         minHeight: 4,
                         borderRadius: BorderRadius.circular(2),
                       ),
@@ -480,7 +488,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
 
     // specific status check to avoid showing "Ready!" on failure
     final isSuccess = prepareResult['status'] == 'READY';
-    
+
     // Show "Ready!" briefly then close ONLY if successful
     if (isSuccess && dialogSetState != null) {
       dialogSetState!(() {
@@ -506,7 +514,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     String amountStr = '';
     if (amountCents != null && amountCents > 0) {
       final dollars = amountCents / 100.0;
-      final currencySymbol = (currency ?? 'usd').toLowerCase() == 'usd' ? '\$' : (currency?.toUpperCase() ?? '');
+      final currencySymbol = (currency ?? 'usd').toLowerCase() == 'usd'
+          ? '\$'
+          : (currency?.toUpperCase() ?? '');
       amountStr = '$currencySymbol${dollars.toStringAsFixed(2)}';
     }
     final cardStr = (last4 != null && last4.isNotEmpty)
@@ -539,21 +549,27 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                     color: Colors.green,
                   ),
                 ),
-              if (cardStr.isNotEmpty) ...
-                [
-                  const SizedBox(height: 4),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.credit_card, size: 16, color: Colors.black54),
-                      const SizedBox(width: 4),
-                      Text(
-                        cardStr,
-                        style: const TextStyle(color: Colors.black54, fontSize: 13),
+              if (cardStr.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(
+                      Icons.credit_card,
+                      size: 16,
+                      color: Colors.black54,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      cardStr,
+                      style: const TextStyle(
+                        color: Colors.black54,
+                        fontSize: 13,
                       ),
-                    ],
-                  ),
-                ],
+                    ),
+                  ],
+                ),
+              ],
               const SizedBox(height: 8),
               const Text(
                 'Your order will be prepared shortly.',
@@ -575,13 +591,20 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
 
   String _formatBrand(String brand) {
     switch (brand.toLowerCase()) {
-      case 'visa': return 'Visa';
-      case 'mastercard': return 'Mastercard';
-      case 'amex': return 'Amex';
-      case 'discover': return 'Discover';
-      case 'jcb': return 'JCB';
-      case 'unionpay': return 'UnionPay';
-      default: return brand[0].toUpperCase() + brand.substring(1);
+      case 'visa':
+        return 'Visa';
+      case 'mastercard':
+        return 'Mastercard';
+      case 'amex':
+        return 'Amex';
+      case 'discover':
+        return 'Discover';
+      case 'jcb':
+        return 'JCB';
+      case 'unionpay':
+        return 'UnionPay';
+      default:
+        return brand[0].toUpperCase() + brand.substring(1);
     }
   }
 
@@ -595,7 +618,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     final label = _isMicRequesting
         ? "Requesting microphone..."
         : (_isPaymentProcessing ? "Processing payment..." : "Loading...");
-    
+
     final sublabel = "Please wait a moment";
     const brandColor = Color(0xFFC2410C);
     return Positioned.fill(
@@ -762,9 +785,12 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                   _checkNfcOnStartup();
                   _injectWebViewFixes(controller);
                 },
-                onReceivedServerTrustAuthRequest: (controller, challenge) async {
-                  return ServerTrustAuthResponse(action: ServerTrustAuthResponseAction.PROCEED);
-                },
+                onReceivedServerTrustAuthRequest:
+                    (controller, challenge) async {
+                      return ServerTrustAuthResponse(
+                        action: ServerTrustAuthResponseAction.PROCEED,
+                      );
+                    },
                 onReceivedError: (controller, request, error) async {
                   if (!mounted) return;
                   // Ignore subframe errors or non-critical resource failures
@@ -787,7 +813,8 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                   setState(() {
                     _isPageLoading = false;
                     _hasPageLoadError = true;
-                    _pageLoadErrorMessage = "${error.description}\n(Retrying $_retryCount/5...)";
+                    _pageLoadErrorMessage =
+                        "${error.description}\n(Retrying $_retryCount/5...)";
                     _showWebView = false;
                   });
                 },
@@ -994,8 +1021,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                             "CONNECT_FAILED",
                           };
 
-                          final isSilentFallback = silentFallbackCodes
-                              .contains(normalizedCode);
+                          final isSilentFallback = silentFallbackCodes.contains(
+                            normalizedCode,
+                          );
 
                           final errorPayload = _buildFallbackPayload(
                             code: normalizedCode.isEmpty
@@ -1004,7 +1032,8 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                             reason: normalizedCode.isEmpty
                                 ? "NATIVE_ERROR"
                                 : normalizedCode,
-                            message: e.message ??
+                            message:
+                                e.message ??
                                 "Tap to Pay unavailable. Use card flow.",
                             details: e.details,
                           );
@@ -1013,7 +1042,8 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           if (!isSilentFallback) {
                             await _showPaymentErrorDialog(
                               title: "Payment Failed",
-                              message: e.message ??
+                              message:
+                                  e.message ??
                                   "Payment failed. Please try again.",
                             );
                           }
