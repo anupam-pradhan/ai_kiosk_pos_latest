@@ -24,7 +24,7 @@ import com.stripe.stripeterminal.external.callable.DiscoveryListener
 import com.stripe.stripeterminal.external.callable.PaymentIntentCallback
 import com.stripe.stripeterminal.external.callable.ReaderCallback
 import com.stripe.stripeterminal.external.callable.TerminalListener
-import com.stripe.stripeterminal.external.models.CollectConfiguration
+import com.stripe.stripeterminal.external.models.CollectPaymentIntentConfiguration
 import com.stripe.stripeterminal.external.models.ConnectionConfiguration
 import com.stripe.stripeterminal.external.models.ConnectionStatus
 import com.stripe.stripeterminal.external.models.ConnectionTokenException
@@ -33,6 +33,7 @@ import com.stripe.stripeterminal.external.models.PaymentIntent
 import com.stripe.stripeterminal.external.models.PaymentStatus
 import com.stripe.stripeterminal.external.models.Reader
 import com.stripe.stripeterminal.external.models.TerminalException
+import com.stripe.stripeterminal.external.OfflineMode
 import com.stripe.stripeterminal.log.LogLevel
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -414,7 +415,7 @@ class MainActivity : FlutterActivity(), TerminalListener {
     terminal.retrievePaymentIntent(secret, object: PaymentIntentCallback {
       override fun onSuccess(intent: PaymentIntent) {
         ttpActivityLaunched = true
-        val config = CollectConfiguration.Builder().build()
+        val config = CollectPaymentIntentConfiguration.Builder().build()
         currentPaymentCancelable = terminal.collectPaymentMethod(intent, object: PaymentIntentCallback {
           override fun onSuccess(collected: PaymentIntent) {
              currentPaymentCancelable = null
@@ -439,10 +440,11 @@ class MainActivity : FlutterActivity(), TerminalListener {
     })
   }
 
+  @OptIn(OfflineMode::class)
   private fun ensureTerminalInitialized(url: String, onReady: ()->Unit) {
     if (!Terminal.isInitialized()) {
       try {
-        Terminal.initTerminal(applicationContext, LogLevel.VERBOSE, createTokenProvider(url), this)
+        Terminal.init(applicationContext, LogLevel.VERBOSE, createTokenProvider(url), this, null)
       } catch (e: Exception) {
         Log.e("StripeTerminal", "Failed to initialize terminal: ${e.message}")
       }
