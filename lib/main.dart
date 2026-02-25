@@ -25,11 +25,7 @@ Future<void> main() async {
 
   // Initialize Stripe Terminal with prewarmup for faster payment sheet opening
   try {
-    const stripePublishableKey = String.fromEnvironment(
-      'STRIPE_PUBLISHABLE_KEY',
-      defaultValue: '', // Add your default key or fetch from .env
-    );
-    // Stripe Terminal is initialized in native code (Android)
+    // Stripe Terminal is initialized in native code (Android/KioskApplication.kt)
     if (kDebugMode) {
       print('Stripe Terminal SDK 5.2.0 initialized');
     }

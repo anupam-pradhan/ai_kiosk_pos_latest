@@ -510,14 +510,18 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     String? currency,
   }) async {
     if (!mounted) return;
-    // Format amount: cents -> readable string e.g. "$12.50"
+    // Format amount: cents -> readable string e.g. "£12.50"
     String amountStr = '';
     if (amountCents != null && amountCents > 0) {
-      final dollars = amountCents / 100.0;
-      final currencySymbol = (currency ?? 'usd').toLowerCase() == 'usd'
-          ? '\$'
-          : (currency?.toUpperCase() ?? '');
-      amountStr = '$currencySymbol${dollars.toStringAsFixed(2)}';
+      final amount = amountCents / 100.0;
+      final cur = (currency ?? 'gbp').toLowerCase();
+      final currencySymbol = switch (cur) {
+        'gbp' => '£',
+        'usd' => '\$',
+        'eur' => '€',
+        _ => '${currency?.toUpperCase() ?? ''} ',
+      };
+      amountStr = '$currencySymbol${amount.toStringAsFixed(2)}';
     }
     final cardStr = (last4 != null && last4.isNotEmpty)
         ? '${cardBrand != null ? '${_formatBrand(cardBrand)} ' : ''}ending in $last4'
