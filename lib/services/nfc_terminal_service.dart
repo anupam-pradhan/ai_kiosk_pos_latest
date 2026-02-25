@@ -4,7 +4,6 @@ import 'package:flutter/services.dart';
 /// Provides unified interface for NFC reading with Stripe Terminal
 class NFCTerminalService {
   static const platform = MethodChannel('kiosk.stripe.terminal');
-  static const eventChannel = EventChannel('kiosk.stripe.terminal.events');
 
   /// Warm up the NFC stack on app startup
   /// This should be called once when the app launches to pre-initialize
@@ -43,9 +42,20 @@ class NFCTerminalService {
   }
 
   /// Prepare Tap to Pay with proper initialization
-  static Future<bool> prepareTapToPay(String baseUrl) async {
+  /// [terminalBaseUrl] - Your backend base URL for Stripe connection tokens
+  /// [locationId] - Stripe Terminal location ID
+  /// [isSimulated] - Whether to use simulated reader (debug only)
+  static Future<bool> prepareTapToPay({
+    required String terminalBaseUrl,
+    required String locationId,
+    bool isSimulated = false,
+  }) async {
     try {
-      await platform.invokeMethod('prepareTapToPay', {'baseUrl': baseUrl});
+      await platform.invokeMethod('prepareTapToPay', {
+        'terminalBaseUrl': terminalBaseUrl,
+        'locationId': locationId,
+        'isSimulated': isSimulated,
+      });
       return true;
     } catch (e) {
       return false;
@@ -54,10 +64,17 @@ class NFCTerminalService {
 
   /// Process NFC payment using Stripe Terminal Tap to Pay
   /// Combines NFC card reading with Stripe payment processing
+  /// [terminalBaseUrl] - Your backend base URL
+  /// [clientSecret] - PaymentIntent client secret from your backend
+  /// [locationId] - Stripe Terminal location ID
+  /// [orderId] - Optional order ID for tracking
+  /// [isSimulated] - Whether to use simulated reader (debug only)
   static Future<Map<String, dynamic>> processNFCPayment({
-    required String baseUrl,
-    required double amount,
-    String? currency = 'USD',
+    required String terminalBaseUrl,
+    required String clientSecret,
+    required String locationId,
+    String? orderId,
+    bool isSimulated = false,
   }) async {
     try {
       // Request microphone permission first
@@ -76,16 +93,22 @@ class NFCTerminalService {
       }
 
       // Prepare Tap to Pay
-      final prepared = await prepareTapToPay(baseUrl);
+      final prepared = await prepareTapToPay(
+        terminalBaseUrl: terminalBaseUrl,
+        locationId: locationId,
+        isSimulated: isSimulated,
+      );
       if (!prepared) {
         return {'success': false, 'error': 'Failed to prepare Tap to Pay'};
       }
 
       // Start payment with NFC
       final result = await platform.invokeMethod<Map>('startTapToPay', {
-        'baseUrl': baseUrl,
-        'amount': (amount * 100).toInt(), // Convert to cents
-        'currency': currency,
+        'terminalBaseUrl': terminalBaseUrl,
+        'clientSecret': clientSecret,
+        'locationId': locationId,
+        'orderId': orderId,
+        'isSimulated': isSimulated,
       });
 
       return Map<String, dynamic>.from(
@@ -104,13 +127,6 @@ class NFCTerminalService {
     } catch (e) {
       return {'enabled': false, 'error': e.toString()};
     }
-  }
-
-  /// Listen to payment progress events
-  static Stream<Map<String, dynamic>> getPaymentProgressStream() {
-    return eventChannel.receiveBroadcastStream().map(
-      (event) => Map<String, dynamic>.from(event ?? {}),
-    );
   }
 
   /// Open NFC settings on device

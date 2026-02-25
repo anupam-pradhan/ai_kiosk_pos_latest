@@ -99,8 +99,6 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     terminalChannel.setMethodCallHandler(null);
-    WidgetsBinding.instance.removeObserver(this);
-    terminalChannel.setMethodCallHandler(null);
     _ttpProgressController.close();
     _retryTimer?.cancel();
     super.dispose();

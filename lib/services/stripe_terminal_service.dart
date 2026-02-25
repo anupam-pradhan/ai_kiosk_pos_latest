@@ -4,22 +4,6 @@ import 'package:flutter/services.dart';
 /// Works with the native Android implementation using Stripe Terminal SDK 5.2.0
 class StripeService {
   static const platform = MethodChannel('kiosk.stripe.terminal');
-  static const eventChannel = EventChannel('kiosk.stripe.terminal.events');
-
-  /// Initialize Stripe Terminal (already done in native code)
-  static Future<void> initializeStripe({
-    required String publishableKey,
-    String? baseUrl,
-  }) async {
-    try {
-      await platform.invokeMethod('initialize', {
-        'publishableKey': publishableKey,
-        'baseUrl': baseUrl,
-      });
-    } catch (e) {
-      throw Exception('Failed to initialize Stripe: $e');
-    }
-  }
 
   /// Warm up NFC stack on app startup for faster payment processing
   /// This initializes the Stripe Terminal reader discovery in the background
@@ -37,12 +21,19 @@ class StripeService {
   }
 
   /// Prepare Tap to Pay reader
+  /// [terminalBaseUrl] - Your backend base URL for Stripe connection tokens
+  /// [locationId] - Stripe Terminal location ID
+  /// [isSimulated] - Whether to use simulated reader (debug only)
   static Future<Map<String, dynamic>> prepareTapToPay({
-    required String baseUrl,
+    required String terminalBaseUrl,
+    required String locationId,
+    bool isSimulated = false,
   }) async {
     try {
       final result = await platform.invokeMethod<Map>('prepareTapToPay', {
-        'baseUrl': baseUrl,
+        'terminalBaseUrl': terminalBaseUrl,
+        'locationId': locationId,
+        'isSimulated': isSimulated,
       });
       return Map<String, dynamic>.from(result ?? {});
     } catch (e) {
@@ -51,16 +42,25 @@ class StripeService {
   }
 
   /// Start Tap to Pay payment
+  /// [terminalBaseUrl] - Your backend base URL
+  /// [clientSecret] - PaymentIntent client secret from your backend
+  /// [locationId] - Stripe Terminal location ID
+  /// [orderId] - Optional order ID for tracking
+  /// [isSimulated] - Whether to use simulated reader (debug only)
   static Future<Map<String, dynamic>> startTapToPay({
-    required String baseUrl,
-    required double amount,
-    String? currency = 'USD',
+    required String terminalBaseUrl,
+    required String clientSecret,
+    required String locationId,
+    String? orderId,
+    bool isSimulated = false,
   }) async {
     try {
       final result = await platform.invokeMethod<Map>('startTapToPay', {
-        'baseUrl': baseUrl,
-        'amount': (amount * 100).toInt(), // Convert to cents
-        'currency': currency,
+        'terminalBaseUrl': terminalBaseUrl,
+        'clientSecret': clientSecret,
+        'locationId': locationId,
+        'orderId': orderId,
+        'isSimulated': isSimulated,
       });
       return Map<String, dynamic>.from(result ?? {});
     } catch (e) {
@@ -97,12 +97,5 @@ class StripeService {
     } catch (e) {
       throw Exception('Failed to open NFC settings: $e');
     }
-  }
-
-  /// Listen to Stripe Terminal progress updates
-  static Stream<Map<String, dynamic>> getTtpProgressStream() {
-    return eventChannel.receiveBroadcastStream().map(
-      (event) => Map<String, dynamic>.from(event ?? {}),
-    );
   }
 }

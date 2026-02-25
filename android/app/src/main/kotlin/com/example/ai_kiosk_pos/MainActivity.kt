@@ -118,7 +118,11 @@ class MainActivity : FlutterActivity(), TerminalListener {
     
     // Start NFC prewarmup in background when activity is created
     activityScope.launch {
-      prewarmupNfcInBackground()
+      try {
+        prewarmupNfcInBackground()
+      } catch (e: Exception) {
+        Log.w("StripeTerminal", "NFC prewarmup on startup failed (non-critical): ${e.message}")
+      }
     }
   }
 
@@ -205,7 +209,6 @@ class MainActivity : FlutterActivity(), TerminalListener {
 
           sendProgress(1, "Connecting...")
           
-          // v4.x: Use TapToPayDiscoveryConfiguration
           val config = DiscoveryConfiguration.TapToPayDiscoveryConfiguration(isSimulated)
 
           discoveryCancelable = terminal.discoverReaders(config, object : DiscoveryListener {
@@ -216,11 +219,11 @@ class MainActivity : FlutterActivity(), TerminalListener {
                 discoveryCancelable?.cancel(object : Callback {
                   override fun onSuccess() {
                     discoveryCancelable = null
-                    connectToReader(reader, locationId, result, true)
+                    retryConnectReader(reader, locationId, result, true)
                   }
                   override fun onFailure(e: TerminalException) {
                     discoveryCancelable = null
-                    connectToReader(reader, locationId, result, true) // Try anyway
+                    retryConnectReader(reader, locationId, result, true) // Try anyway
                   }
                 })
               }
@@ -250,28 +253,58 @@ class MainActivity : FlutterActivity(), TerminalListener {
   private fun deviceId(): String =
     Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: Build.MODEL
 
-  private fun connectToReader(reader: Reader, locationId: String, result: MethodChannel.Result?, isPrepare: Boolean) {
+  /**
+   * Retry connection with exponential backoff.
+   * Improves reliability on unstable connections by auto-retrying transient failures.
+   */
+  private fun retryConnectReader(
+      reader: Reader,
+      locationId: String,
+      result: MethodChannel.Result?,
+      isPrepare: Boolean,
+      maxRetries: Int = 2,
+      delayMs: Long = 500
+  ) {
     sendProgress(2, "Downloading...")
-    
-    // v4.x: Use TapToPayConnectionConfiguration and connectReader (unified method)
-    val config = ConnectionConfiguration.TapToPayConnectionConfiguration(
-      locationId,
-      autoReconnectOnUnexpectedDisconnect = true,
-      tapToPayReaderListener = null
-    )
-    
-    Terminal.getInstance().connectReader(reader, config, object : ReaderCallback {
-      override fun onSuccess(reader: Reader) {
-        isConnectingReader.set(false)
-        sendProgress(3, "Ready!")
-        result?.success(mapOf("status" to "READY"))
-      }
-      override fun onFailure(e: TerminalException) {
-        isConnectingReader.set(false)
-        sendProgress(3, "Ready (warning)")
-        if (isPrepare) result?.success(mapOf("status" to "READY", "warning" to e.errorMessage))
-      }
-    })
+    var currentDelay = delayMs
+    var attemptCount = 0
+
+    fun attemptConnect() {
+      attemptCount++
+      val config = ConnectionConfiguration.TapToPayConnectionConfiguration(
+        locationId,
+        autoReconnectOnUnexpectedDisconnect = true,
+        tapToPayReaderListener = null
+      )
+      
+      Terminal.getInstance().connectReader(reader, config, object : ReaderCallback {
+        override fun onSuccess(reader: Reader) {
+          isConnectingReader.set(false)
+          sendProgress(3, "Ready!")
+          result?.success(mapOf("status" to "READY"))
+        }
+
+        override fun onFailure(e: TerminalException) {
+          if (attemptCount < maxRetries) {
+            Log.w("StripeTerminal", "Connection attempt $attemptCount failed: ${e.message}, retrying in ${currentDelay}ms")
+            mainHandler.postDelayed({
+              currentDelay *= 2  // Exponential backoff
+              attemptConnect()
+            }, currentDelay)
+          } else {
+            isConnectingReader.set(false)
+            sendProgress(3, "Ready (warning)")
+            if (isPrepare) {
+              result?.success(mapOf("status" to "READY", "warning" to "Connection retries exhausted: ${e.errorMessage}"))
+            } else {
+              result?.error("CONNECT_FAILED", "Connection failed after $maxRetries retries: ${e.errorMessage}", null)
+            }
+          }
+        }
+      })
+    }
+
+    attemptConnect()
   }
 
   private fun startTapToPay(args: Map<*, *>, result: MethodChannel.Result) {
@@ -320,7 +353,6 @@ class MainActivity : FlutterActivity(), TerminalListener {
 
         var readerFoundAndConnecting = false
         
-        // v4.x: Use TapToPayDiscoveryConfiguration
         val config = DiscoveryConfiguration.TapToPayDiscoveryConfiguration(isSim)
         
         discoveryCancelable = terminal.discoverReaders(config, object: DiscoveryListener {
@@ -331,7 +363,6 @@ class MainActivity : FlutterActivity(), TerminalListener {
               discoveryCancelable?.cancel(object: Callback {
                 override fun onSuccess() {
                    discoveryCancelable = null
-                   // v4.x: Use TapToPayConnectionConfiguration and connectReader
                    val cConfig = ConnectionConfiguration.TapToPayConnectionConfiguration(
                      locId,
                      autoReconnectOnUnexpectedDisconnect = true,
@@ -344,7 +375,6 @@ class MainActivity : FlutterActivity(), TerminalListener {
                 }
                 override fun onFailure(e: TerminalException) {
                   discoveryCancelable = null
-                  // Discovery cancel failed but we still have the reader — try connecting anyway
                   val cConfig = ConnectionConfiguration.TapToPayConnectionConfiguration(
                     locId,
                     autoReconnectOnUnexpectedDisconnect = true,
@@ -393,68 +423,15 @@ class MainActivity : FlutterActivity(), TerminalListener {
     )
   }
 
-  /**
-   * Retry connection with exponential backoff (Tier 1 optimization)
-   * Improves reliability on unstable connections by auto-retrying transient failures
-   */
-  private fun retryConnectReader(
-      reader: Reader,
-      locationId: String,
-      result: MethodChannel.Result,
-      isPrepare: Boolean,
-      maxRetries: Int = 2,
-      delayMs: Long = 500
-  ) {
-    var currentDelay = delayMs
-    var attemptCount = 0
-
-    fun attemptConnect() {
-      attemptCount++
-      val config = ConnectionConfiguration.TapToPayConnectionConfiguration(
-        locationId,
-        autoReconnectOnUnexpectedDisconnect = true,
-        tapToPayReaderListener = null
-      )
-      
-      Terminal.getInstance().connectReader(reader, config, object : ReaderCallback {
-        override fun onSuccess(reader: Reader) {
-          isConnectingReader.set(false)
-          sendProgress(3, "Ready!")
-          result.success(mapOf("status" to "READY"))
-        }
-
-        override fun onFailure(e: TerminalException) {
-          if (attemptCount < maxRetries) {
-            Log.w("StripeTerminal", "Connection attempt $attemptCount failed: ${e.message}, retrying in ${currentDelay}ms")
-            mainHandler.postDelayed({
-              currentDelay *= 2  // Exponential backoff
-              attemptConnect()
-            }, currentDelay)
-          } else {
-            isConnectingReader.set(false)
-            sendProgress(3, "Ready (warning)")
-            if (isPrepare) {
-              result.success(mapOf("status" to "READY", "warning" to "Connection retries exhausted: ${e.errorMessage}"))
-            }
-          }
-        }
-      })
-    }
-
-    attemptConnect()
-  }
-
   private fun retrieveAndProcess(secret: String, orderId: String?) {
     val terminal = Terminal.getInstance()
     terminal.retrievePaymentIntent(secret, object: PaymentIntentCallback {
       override fun onSuccess(intent: PaymentIntent) {
         ttpActivityLaunched = true
-        // v4.x: collectPaymentMethod(intent, callback, config)
         val config = CollectConfiguration.Builder().build()
         currentPaymentCancelable = terminal.collectPaymentMethod(intent, object: PaymentIntentCallback {
           override fun onSuccess(collected: PaymentIntent) {
              currentPaymentCancelable = null
-             // v4.x: confirmPaymentIntent (renamed from processPayment)
              terminal.confirmPaymentIntent(collected, object: PaymentIntentCallback {
                override fun onSuccess(processed: PaymentIntent) {
                  finishWithSuccess(mapOf("status" to "SUCCESS", "paymentIntentId" to processed.id, "amount" to processed.amount, "currency" to processed.currency, "orderId" to orderId))
@@ -599,11 +576,11 @@ class MainActivity : FlutterActivity(), TerminalListener {
    * background services.
    */
   private fun prewarmupNfcInBackground() {
-    val terminal = Terminal.getInstance()
-    if (!terminal.isInitialized()) {
+    if (!Terminal.isInitialized()) {
       Log.d("StripeTerminal", "Terminal not yet initialized, skipping NFC prewarmup")
       return
     }
+    val terminal = Terminal.getInstance()
 
     Log.d("StripeTerminal", "Starting NFC prewarmup in background...")
     
@@ -662,8 +639,13 @@ class MainActivity : FlutterActivity(), TerminalListener {
    */
   private fun prewarmupNfc(args: Map<*, *>, result: MethodChannel.Result) {
     Log.d("StripeTerminal", "Explicit prewarmup requested from Flutter")
-    prewarmupNfcInBackground()
-    result.success(mapOf("status" to "PREWARMUP_STARTED"))
+    try {
+      prewarmupNfcInBackground()
+      result.success(mapOf("status" to "PREWARMUP_STARTED"))
+    } catch (e: Exception) {
+      Log.w("StripeTerminal", "Prewarmup failed (non-critical): ${e.message}")
+      result.success(mapOf("status" to "PREWARMUP_SKIPPED", "reason" to (e.message ?: "Terminal not ready")))
+    }
   }
 
   private fun getNfcStatus(res: MethodChannel.Result) {
@@ -686,8 +668,8 @@ class MainActivity : FlutterActivity(), TerminalListener {
     } else super.onRequestPermissionsResult(requestCode, permissions, grantResults)
   }
 
-  // v4.x TerminalListener: onUnexpectedReaderDisconnect removed.
-  // Disconnect handling now goes through TapToPayReaderListener on the connection config.
+  // TerminalListener: onUnexpectedReaderDisconnect removed in SDK 5.x.
+  // Disconnect handling goes through TapToPayReaderListener on the connection config.
   override fun onConnectionStatusChange(status: ConnectionStatus) {}
   override fun onPaymentStatusChange(status: PaymentStatus) {}
 }

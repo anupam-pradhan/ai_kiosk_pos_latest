@@ -73,7 +73,7 @@ class KioskApplication : Application() {
     // The corrupted Tink keyset is stored in SharedPrefs with an
     // unpredictable name, so we must wipe everything to be safe.
     runCatching {
-      // dataDir is available since API 24 (we are minSdk 33)
+      // dataDir is available since API 24 (our minSdk is 26)
       val prefsDir = File(dataDir, "shared_prefs")
       if (prefsDir.exists()) {
         prefsDir.listFiles()?.forEach { file ->
