@@ -62,7 +62,17 @@ class MainActivity : FlutterActivity(), TerminalListener {
   private val channelName = "kiosk.stripe.terminal"
   private val tapToPayTimeoutMs = 120_000L
   private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-  private val httpClient = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).build()
+  
+  // HTTP timeout optimization (Tier 1 optimization)
+  private val httpTimeoutConnectMs = 10_000L  // 10 seconds
+  private val httpTimeoutReadMs = 15_000L     // 15 seconds
+  private val httpTimeoutWriteMs = 15_000L    // 15 seconds
+  
+  private val httpClient = OkHttpClient.Builder()
+    .connectTimeout(httpTimeoutConnectMs, TimeUnit.MILLISECONDS)
+    .readTimeout(httpTimeoutReadMs, TimeUnit.MILLISECONDS)
+    .writeTimeout(httpTimeoutWriteMs, TimeUnit.MILLISECONDS)
+    .build()
 
   private val mainHandler = Handler(Looper.getMainLooper())
   private val isProcessing = AtomicBoolean(false)
@@ -381,6 +391,57 @@ class MainActivity : FlutterActivity(), TerminalListener {
       },
       onDenied = { onErr("LOCATION_ERROR", "Location permission denied") }
     )
+  }
+
+  /**
+   * Retry connection with exponential backoff (Tier 1 optimization)
+   * Improves reliability on unstable connections by auto-retrying transient failures
+   */
+  private fun retryConnectReader(
+      reader: Reader,
+      locationId: String,
+      result: MethodChannel.Result,
+      isPrepare: Boolean,
+      maxRetries: Int = 2,
+      delayMs: Long = 500
+  ) {
+    var currentDelay = delayMs
+    var attemptCount = 0
+
+    fun attemptConnect() {
+      attemptCount++
+      val config = ConnectionConfiguration.TapToPayConnectionConfiguration(
+        locationId,
+        autoReconnectOnUnexpectedDisconnect = true,
+        tapToPayReaderListener = null
+      )
+      
+      Terminal.getInstance().connectReader(reader, config, object : ReaderCallback {
+        override fun onSuccess(reader: Reader) {
+          isConnectingReader.set(false)
+          sendProgress(3, "Ready!")
+          result.success(mapOf("status" to "READY"))
+        }
+
+        override fun onFailure(e: TerminalException) {
+          if (attemptCount < maxRetries) {
+            Log.w("StripeTerminal", "Connection attempt $attemptCount failed: ${e.message}, retrying in ${currentDelay}ms")
+            mainHandler.postDelayed({
+              currentDelay *= 2  // Exponential backoff
+              attemptConnect()
+            }, currentDelay)
+          } else {
+            isConnectingReader.set(false)
+            sendProgress(3, "Ready (warning)")
+            if (isPrepare) {
+              result.success(mapOf("status" to "READY", "warning" to "Connection retries exhausted: ${e.errorMessage}"))
+            }
+          }
+        }
+      })
+    }
+
+    attemptConnect()
   }
 
   private fun retrieveAndProcess(secret: String, orderId: String?) {
