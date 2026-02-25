@@ -4,6 +4,7 @@ import '../config/app_config.dart';
 import '../models/kiosk_mode.dart';
 import '../widgets/kiosk_mode_card.dart';
 import 'kiosk_webview_screen.dart';
+import '../services/kiosk_mode_service.dart';
 
 /// Screen that displays three kiosk mode options for the user to choose from
 class KioskModeSelectionScreen extends StatefulWidget {
@@ -35,18 +36,25 @@ class _KioskModeSelectionScreenState extends State<KioskModeSelectionScreen> {
   static const brandLight = Color(0xFFFFF2E9);
 
   /// Navigate to the webview with the selected kiosk mode
-  void _openKioskMode(BuildContext context, KioskMode mode) {
-    Navigator.of(context).pushReplacement(
-      PageRouteBuilder(
-        pageBuilder: (context, animation, secondaryAnimation) {
-          return KioskWebViewScreen(kioskUrl: mode.url, title: mode.title);
-        },
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          return FadeTransition(opacity: animation, child: child);
-        },
-        transitionDuration: const Duration(milliseconds: 250),
-      ),
-    );
+  /// Also saves the selection to SharedPreferences for persistent selection
+  void _openKioskMode(BuildContext context, KioskMode mode) async {
+    // Save the kiosk mode selection
+    await KioskModeService.setKioskMode(mode.title, mode.url);
+
+    // Navigate to the webview
+    if (context.mounted) {
+      Navigator.of(context).pushReplacement(
+        PageRouteBuilder(
+          pageBuilder: (context, animation, secondaryAnimation) {
+            return KioskWebViewScreen(kioskUrl: mode.url, title: mode.title);
+          },
+          transitionsBuilder: (context, animation, secondaryAnimation, child) {
+            return FadeTransition(opacity: animation, child: child);
+          },
+          transitionDuration: const Duration(milliseconds: 250),
+        ),
+      );
+    }
   }
 
   /// Get the list of available kiosk modes

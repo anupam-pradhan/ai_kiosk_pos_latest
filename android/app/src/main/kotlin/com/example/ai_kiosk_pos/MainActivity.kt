@@ -101,8 +101,14 @@ class MainActivity : FlutterActivity(), TerminalListener {
         "requestMicrophonePermission" -> requestMicrophonePermission(result)
         "getNfcStatus"    -> getNfcStatus(result)
         "openNfcSettings" -> { openNfcSettings(); result.success(true) }
+        "prewarmupNfc"    -> prewarmupNfc(args, result)
         else              -> result.notImplemented()
       }
+    }
+    
+    // Start NFC prewarmup in background when activity is created
+    activityScope.launch {
+      prewarmupNfcInBackground()
     }
   }
 
@@ -520,6 +526,83 @@ class MainActivity : FlutterActivity(), TerminalListener {
       pendingMicrophoneResult = res
       ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), microphonePermissionRequestCode)
     }
+  }
+
+  /**
+   * Warm up the NFC stack by initiating reader discovery in the background.
+   * This runs on app startup to pre-initialize the Stripe Terminal SDK
+   * and have the NFC hardware ready before the user makes a payment.
+   * 
+   * The discovery is cancelled after a short timeout to avoid blocking
+   * the UI or draining battery, but it still initializes the necessary
+   * background services.
+   */
+  private fun prewarmupNfcInBackground() {
+    val terminal = Terminal.getInstance()
+    if (!terminal.isInitialized()) {
+      Log.d("StripeTerminal", "Terminal not yet initialized, skipping NFC prewarmup")
+      return
+    }
+
+    Log.d("StripeTerminal", "Starting NFC prewarmup in background...")
+    
+    // Request location permission silently if not granted
+    ensureLocationPermission(
+      onGranted = {
+        if (!isLocationServicesEnabled()) {
+          Log.w("StripeTerminal", "Location services disabled, skipping NFC prewarmup")
+          return@ensureLocationPermission
+        }
+
+        // Start a brief discovery cycle to warm up the NFC stack
+        // This initializes the Stripe Terminal reader discovery without blocking the UI
+        val config = DiscoveryConfiguration.TapToPayDiscoveryConfiguration(false) // Non-simulated
+        
+        val prewarmupCancelable = terminal.discoverReaders(
+          config,
+          object : DiscoveryListener {
+            override fun onUpdateDiscoveredReaders(readers: List<Reader>) {
+              Log.d("StripeTerminal", "NFC prewarmup: Found ${readers.size} reader(s)")
+            }
+          },
+          object : Callback {
+            override fun onSuccess() {
+              Log.d("StripeTerminal", "NFC prewarmup discovery completed")
+            }
+            override fun onFailure(e: TerminalException) {
+              Log.w("StripeTerminal", "NFC prewarmup discovery failed: ${e.message}")
+            }
+          }
+        )
+
+        // Cancel discovery after 2 seconds to warm up the stack without draining battery
+        mainHandler.postDelayed({
+          if (!prewarmupCancelable.isCompleted) {
+            prewarmupCancelable.cancel(object : Callback {
+              override fun onSuccess() {
+                Log.d("StripeTerminal", "NFC prewarmup cancelled successfully after warmup")
+              }
+              override fun onFailure(e: TerminalException) {
+                Log.d("StripeTerminal", "NFC prewarmup cancel failed (normal): ${e.message}")
+              }
+            })
+          }
+        }, 2_000L) // 2 second warmup window
+      },
+      onDenied = {
+        Log.d("StripeTerminal", "Location permission denied, skipping NFC prewarmup")
+      }
+    )
+  }
+
+  /**
+   * Prewarmup method that can be called from Flutter if needed.
+   * Typically called automatically during app startup.
+   */
+  private fun prewarmupNfc(args: Map<*, *>, result: MethodChannel.Result) {
+    Log.d("StripeTerminal", "Explicit prewarmup requested from Flutter")
+    prewarmupNfcInBackground()
+    result.success(mapOf("status" to "PREWARMUP_STARTED"))
   }
 
   private fun getNfcStatus(res: MethodChannel.Result) {
