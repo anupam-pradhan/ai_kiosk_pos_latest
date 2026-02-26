@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../config/app_config.dart';
 
 /// Screen that displays the kiosk web application in a webview
@@ -87,11 +88,53 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
       return null;
     });
 
+    // Eagerly prepare Tap to Pay in background for faster first payment.
+    // Pre-initializes Terminal SDK + discovers + connects reader.
+    _eagerPrepareTapToPay();
+
     Future.delayed(const Duration(seconds: 2), () {
       if (!mounted) return;
       _splashMinElapsed = true;
       _maybeHideSplash();
     });
+  }
+
+  /// Eagerly prepare Tap to Pay in background.
+  /// Reads cached terminalBaseUrl + locationId from SharedPreferences
+  /// (saved during the first payment from the webview) and pre-initializes
+  /// Terminal SDK + discovers + connects reader so subsequent payments
+  /// show the NFC screen in ~2-3s instead of 14-15s.
+  Future<void> _eagerPrepareTapToPay() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final url = prefs.getString('cached_terminal_base_url') ?? '';
+      final locId = prefs.getString('cached_stripe_location_id') ?? '';
+      if (url.isEmpty || locId.isEmpty) {
+        debugPrint('⏭️ Eager TTP skipped: no cached terminal config yet (first launch)');
+        return;
+      }
+      debugPrint('🚀 Eager TTP prepare starting (cached: $url)');
+      await terminalChannel.invokeMethod('eagerPrepare', {
+        'terminalBaseUrl': url,
+        'locationId': locId,
+        'isSimulated': AppConfig.isTapToPaySimulated,
+      });
+      debugPrint('✅ Eager TTP prepare dispatched');
+    } catch (e) {
+      debugPrint('⚠️ Eager TTP prepare failed (non-critical): $e');
+    }
+  }
+
+  /// Cache terminal config from the webview payment request into SharedPreferences.
+  /// Called on every payment so eager init works on next app launch.
+  Future<void> _cacheTerminalConfig(String terminalBaseUrl, String locationId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('cached_terminal_base_url', terminalBaseUrl);
+      await prefs.setString('cached_stripe_location_id', locationId);
+    } catch (e) {
+      debugPrint('⚠️ Failed to cache terminal config: $e');
+    }
   }
 
   @override
@@ -941,6 +984,12 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                                 "terminalBaseUrl must be LAN IP like http://192.168.1.161:4242 (not localhost).",
                           };
                         }
+
+                        // Cache terminal config for eager init on next app launch
+                        await _cacheTerminalConfig(
+                          terminalBaseUrl as String,
+                          locationId as String,
+                        );
 
                         if (mounted) {
                           setState(() {

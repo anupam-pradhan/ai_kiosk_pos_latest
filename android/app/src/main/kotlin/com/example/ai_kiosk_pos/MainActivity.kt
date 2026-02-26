@@ -69,6 +69,34 @@ class MainActivity : FlutterActivity(), TerminalListener {
     .writeTimeout(httpTimeoutWriteMs, TimeUnit.MILLISECONDS)
     .build()
 
+  // Mutable URL for the deferred token provider — set when eagerPrepare/prepareTapToPay/startTapToPay provides it
+  @Volatile private var tokenProviderUrl: String? = null
+
+  // Deferred token provider: Terminal.init() is called at startup with this.
+  // Actual token fetching only happens when the SDK needs one (during discoverReaders etc.)
+  private val deferredTokenProvider = object : ConnectionTokenProvider {
+    override fun fetchConnectionToken(callback: ConnectionTokenCallback) {
+      val url = tokenProviderUrl
+      if (url == null) {
+        callback.onFailure(ConnectionTokenException("Terminal base URL not configured yet"))
+        return
+      }
+      activityScope.launch(Dispatchers.IO) {
+        try {
+          val body = "{}".toRequestBody("application/json".toMediaType())
+          val req = Request.Builder().url("$url/terminal/connection_token").post(body).build()
+          val secret = httpClient.newCall(req).execute().use {
+            if (!it.isSuccessful) throw Exception("HTTP ${it.code}")
+            JSONObject(it.body?.string() ?: "").getString("secret")
+          }
+          withContext(Dispatchers.Main) { callback.onSuccess(secret) }
+        } catch (e: Exception) {
+          withContext(Dispatchers.Main) { callback.onFailure(ConnectionTokenException(e.message ?: "Failed", e)) }
+        }
+      }
+    }
+  }
+
   private val mainHandler = Handler(Looper.getMainLooper())
   private val isProcessing = AtomicBoolean(false)
   private val isConnectingReader = AtomicBoolean(false)
@@ -91,6 +119,10 @@ class MainActivity : FlutterActivity(), TerminalListener {
   )
   private val locationPermissionRequestCode = 1001
   private val microphonePermissionRequestCode = 1002
+  private val eagerPermissionRequestCode = 1003
+
+  // Cached config for eager prepare (used after permission grant)
+  private var eagerPrepareConfig: Triple<String, String, Boolean>? = null
 
   private var methodChannel: MethodChannel? = null
 
@@ -107,10 +139,24 @@ class MainActivity : FlutterActivity(), TerminalListener {
         "getNfcStatus"    -> getNfcStatus(result)
         "openNfcSettings" -> { openNfcSettings(); result.success(true) }
         "prewarmupNfc"    -> prewarmupNfc(args, result)
+        "eagerPrepare"   -> eagerPrepare(args, result)
         else              -> result.notImplemented()
       }
     }
     
+    // Pre-initialize Terminal SDK at startup for fastest possible first payment.
+    // Uses deferred token provider — URL is set later by eagerPrepare or payment request.
+    if (!Terminal.isInitialized()) {
+      try {
+        @Suppress("OPT_IN_USAGE")
+        @OptIn(OfflineMode::class)
+        Terminal.init(applicationContext, LogLevel.VERBOSE, deferredTokenProvider, this, null)
+        Log.d("StripeTerminal", "Terminal pre-initialized at startup ✅")
+      } catch (e: Exception) {
+        Log.e("StripeTerminal", "Early Terminal init failed: ${e.message}")
+      }
+    }
+
     // Start NFC prewarmup in background when activity is created
     activityScope.launch {
       try {
@@ -124,6 +170,27 @@ class MainActivity : FlutterActivity(), TerminalListener {
   private fun sendProgress(step: Int, message: String) {
     mainHandler.post {
       methodChannel?.invokeMethod("onTtpProgress", mapOf("step" to step, "message" to message))
+    }
+  }
+
+  /**
+   * Pre-request all permissions at Activity startup for maximum payment speed.
+   * By the time the user hits "Pay", permissions are already granted.
+   */
+  override fun onStart() {
+    super.onStart()
+    val needed = mutableListOf<String>()
+    locationPermissions.forEach { perm ->
+      if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
+        needed.add(perm)
+      }
+    }
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+      needed.add(Manifest.permission.RECORD_AUDIO)
+    }
+    if (needed.isNotEmpty()) {
+      Log.d("StripeTerminal", "Pre-requesting ${needed.size} permission(s) at startup")
+      ActivityCompat.requestPermissions(this, needed.toTypedArray(), eagerPermissionRequestCode)
     }
   }
 
@@ -191,9 +258,22 @@ class MainActivity : FlutterActivity(), TerminalListener {
         return@ensureTerminalInitialized result.success(mapOf("status" to "READY"))
       }
 
-      if (isConnectingReader.getAndSet(true)) {
-        return@ensureTerminalInitialized result.success(mapOf("status" to "READY"))
+      if (isConnectingReader.get()) {
+        // Eager init is already connecting — wait for it to finish
+        awaitReaderConnection(
+          onConnected = {
+            sendProgress(3, "Ready!")
+            result.success(mapOf("status" to "READY"))
+          },
+          onTimeout = {
+            // Eager connect didn't finish in time — return READY anyway
+            // startTapToPay will handle connection via ensureReaderConnected
+            result.success(mapOf("status" to "READY", "warning" to "Reader not yet connected"))
+          }
+        )
+        return@ensureTerminalInitialized
       }
+      isConnectingReader.set(true)
 
       ensureLocationPermission(
         onGranted = {
@@ -313,9 +393,55 @@ class MainActivity : FlutterActivity(), TerminalListener {
     terminalBaseUrl = nUrl
 
     ensureTerminalInitialized(nUrl) {
-      ensureReaderConnected(locId, isSim, {
+      val terminal = Terminal.getInstance()
+
+      // FAST PATH: Reader already connected → just retrieve and process
+      if (terminal.connectedReader != null) {
         retrieveAndProcess(secret, orderId)
-      }, { c, m -> finishWithError(c, m, null) })
+        return@ensureTerminalInitialized
+      }
+
+      // PARALLEL PATH: Start retrieve PI + connect reader simultaneously
+      // retrievePaymentIntent only needs Terminal initialized (not a reader)
+      // This overlaps the 1-2s retrieve with the 3-5s discover+connect
+      var retrievedIntent: PaymentIntent? = null
+      var retrieveFailed: TerminalException? = null
+      var readerReady = false
+      var connectFailed: Pair<String, String>? = null
+      val resolved = AtomicBoolean(false)
+
+      fun tryFinish() {
+        val intentDone = retrievedIntent != null || retrieveFailed != null
+        val connDone = readerReady || connectFailed != null
+        if (!intentDone || !connDone) return
+        if (!resolved.compareAndSet(false, true)) return
+
+        connectFailed?.let { (c, m) -> return finishWithError(c, m, null) }
+        retrieveFailed?.let { e -> return finishWithError("RETRIEVE_FAILED", e.errorMessage ?: "Retrieve failed", e.toString()) }
+
+        collectAndConfirm(retrievedIntent!!, orderId)
+      }
+
+      // Leg 1: Retrieve PI (only needs Terminal, not a reader)
+      terminal.retrievePaymentIntent(secret, object: PaymentIntentCallback {
+        override fun onSuccess(intent: PaymentIntent) {
+          retrievedIntent = intent
+          mainHandler.post { tryFinish() }
+        }
+        override fun onFailure(e: TerminalException) {
+          retrieveFailed = e
+          mainHandler.post { tryFinish() }
+        }
+      })
+
+      // Leg 2: Discover + connect reader in parallel
+      ensureReaderConnected(locId, isSim, { _ ->
+        readerReady = true
+        mainHandler.post { tryFinish() }
+      }, { c, m ->
+        connectFailed = c to m
+        mainHandler.post { tryFinish() }
+      })
     }
   }
 
@@ -327,7 +453,15 @@ class MainActivity : FlutterActivity(), TerminalListener {
       onGranted = {
         if (!isLocationServicesEnabled()) return@ensureLocationPermission onErr("LOCATION_ERROR", "Location services disabled")
         
-        if (isConnectingReader.getAndSet(true)) return@ensureLocationPermission onErr("BUSY", "SDK is busy connecting")
+        if (isConnectingReader.get()) {
+          // Eager init or prepareTapToPay is already connecting — wait for it
+          awaitReaderConnection(
+            onConnected = { onConn(it) },
+            onTimeout = { onErr("CONNECT_FAILED", "Reader connection timed out. Please retry.") }
+          )
+          return@ensureLocationPermission
+        }
+        isConnectingReader.set(true)
 
         // Cancel any leftover discovery from a previous attempt
         discoveryCancelable?.let { old ->
@@ -410,29 +544,14 @@ class MainActivity : FlutterActivity(), TerminalListener {
     )
   }
 
+  /**
+   * Retrieve PI then collect+confirm (used when reader is already connected).
+   */
   private fun retrieveAndProcess(secret: String, orderId: String?) {
     val terminal = Terminal.getInstance()
     terminal.retrievePaymentIntent(secret, object: PaymentIntentCallback {
       override fun onSuccess(intent: PaymentIntent) {
-        ttpActivityLaunched = true
-        val config = CollectPaymentIntentConfiguration.Builder().build()
-        currentPaymentCancelable = terminal.collectPaymentMethod(intent, object: PaymentIntentCallback {
-          override fun onSuccess(collected: PaymentIntent) {
-             currentPaymentCancelable = null
-             terminal.confirmPaymentIntent(collected, object: PaymentIntentCallback {
-               override fun onSuccess(processed: PaymentIntent) {
-                 finishWithSuccess(mapOf("status" to "SUCCESS", "paymentIntentId" to processed.id, "amount" to processed.amount, "currency" to processed.currency, "orderId" to orderId))
-               }
-               override fun onFailure(e: TerminalException) {
-                 finishWithError("PROCESS_FAILED", e.errorMessage ?: "Process failed", e.toString())
-               }
-             })
-          }
-          override fun onFailure(e: TerminalException) {
-            currentPaymentCancelable = null
-            finishWithError("COLLECT_FAILED", e.errorMessage ?: "Collect failed", e.toString())
-          }
-        }, config)
+        collectAndConfirm(intent, orderId)
       }
       override fun onFailure(e: TerminalException) {
         finishWithError("RETRIEVE_FAILED", e.errorMessage ?: "Retrieve failed", e.toString())
@@ -440,34 +559,49 @@ class MainActivity : FlutterActivity(), TerminalListener {
     })
   }
 
+  /**
+   * Collect payment method (shows NFC screen) then confirm.
+   * Used by both the fast path (reader already connected) and
+   * the parallel path (retrieve + connect ran simultaneously).
+   */
+  private fun collectAndConfirm(intent: PaymentIntent, orderId: String?) {
+    val terminal = Terminal.getInstance()
+    ttpActivityLaunched = true
+    val config = CollectPaymentIntentConfiguration.Builder().build()
+    currentPaymentCancelable = terminal.collectPaymentMethod(intent, object: PaymentIntentCallback {
+      override fun onSuccess(collected: PaymentIntent) {
+        currentPaymentCancelable = null
+        terminal.confirmPaymentIntent(collected, object: PaymentIntentCallback {
+          override fun onSuccess(processed: PaymentIntent) {
+            finishWithSuccess(mapOf("status" to "SUCCESS", "paymentIntentId" to processed.id, "amount" to processed.amount, "currency" to processed.currency, "orderId" to orderId))
+          }
+          override fun onFailure(e: TerminalException) {
+            finishWithError("PROCESS_FAILED", e.errorMessage ?: "Process failed", e.toString())
+          }
+        })
+      }
+      override fun onFailure(e: TerminalException) {
+        currentPaymentCancelable = null
+        finishWithError("COLLECT_FAILED", e.errorMessage ?: "Collect failed", e.toString())
+      }
+    }, config)
+  }
+
+  /**
+   * Ensure Terminal SDK is initialized and the token provider URL is set.
+   * Terminal is pre-initialized at startup; this just sets/updates the URL.
+   */
   @OptIn(OfflineMode::class)
   private fun ensureTerminalInitialized(url: String, onReady: ()->Unit) {
+    tokenProviderUrl = url  // Set URL for the deferred token provider
     if (!Terminal.isInitialized()) {
       try {
-        Terminal.init(applicationContext, LogLevel.VERBOSE, createTokenProvider(url), this, null)
+        Terminal.init(applicationContext, LogLevel.VERBOSE, deferredTokenProvider, this, null)
       } catch (e: Exception) {
         Log.e("StripeTerminal", "Failed to initialize terminal: ${e.message}")
       }
     }
     onReady()
-  }
-
-  private fun createTokenProvider(url: String) = object : ConnectionTokenProvider {
-    override fun fetchConnectionToken(callback: ConnectionTokenCallback) {
-      activityScope.launch(Dispatchers.IO) {
-        try {
-          val body = "{}".toRequestBody("application/json".toMediaType())
-          val req = Request.Builder().url("$url/terminal/connection_token").post(body).build()
-          val secret = httpClient.newCall(req).execute().use { 
-            if (!it.isSuccessful) throw Exception("HTTP ${it.code}")
-            JSONObject(it.body?.string() ?: "").getString("secret") 
-          }
-          withContext(Dispatchers.Main) { callback.onSuccess(secret) }
-        } catch (e: Exception) {
-          withContext(Dispatchers.Main) { callback.onFailure(ConnectionTokenException(e.message ?: "Failed", e)) }
-        }
-      }
-    }
   }
 
   /**
@@ -551,6 +685,12 @@ class MainActivity : FlutterActivity(), TerminalListener {
       Log.d("StripeTerminal", "Terminal not yet initialized, skipping NFC prewarmup")
       return
     }
+    // Skip prewarmup if no token URL is set yet (first launch, no cache).
+    // The eagerPrepare path handles full discovery+connect once the URL arrives.
+    if (tokenProviderUrl == null) {
+      Log.d("StripeTerminal", "Token provider URL not set, skipping NFC prewarmup (eagerPrepare will handle)")
+      return
+    }
     val terminal = Terminal.getInstance()
 
     Log.d("StripeTerminal", "Starting NFC prewarmup in background...")
@@ -619,6 +759,147 @@ class MainActivity : FlutterActivity(), TerminalListener {
     }
   }
 
+  /**
+   * Eagerly initialize Terminal and connect reader in background.
+   * Called from Dart at app startup to minimize first-payment latency.
+   * Returns immediately — all heavy work happens asynchronously.
+   */
+  private fun eagerPrepare(args: Map<*, *>, result: MethodChannel.Result) {
+    val baseUrl = args["terminalBaseUrl"] as? String
+    val locationId = args["locationId"] as? String
+    val isSimulated = args["isSimulated"] as? Boolean ?: false
+
+    if (baseUrl.isNullOrBlank() || locationId.isNullOrBlank()) {
+      result.success(mapOf("status" to "SKIPPED", "reason" to "Missing terminalBaseUrl or locationId"))
+      return
+    }
+
+    val url = normalizeBaseUrl(baseUrl)
+    terminalBaseUrl = url
+
+    // Return to Dart immediately — background initialization follows
+    result.success(mapOf("status" to "STARTED"))
+
+    // Step 1: Initialize Terminal SDK
+    ensureTerminalInitialized(url) {
+      val terminal = Terminal.getInstance()
+
+      // Step 2: Already connected? Done.
+      if (terminal.connectedReader != null) {
+        Log.d("StripeTerminal", "EagerPrepare: Reader already connected ✅")
+        return@ensureTerminalInitialized
+      }
+
+      // Step 3: Check location permission (if not granted, cache config for retry after grant)
+      if (locationPermissions.any { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }) {
+        Log.d("StripeTerminal", "EagerPrepare: Location permission not yet granted, will retry after grant")
+        eagerPrepareConfig = Triple(url, locationId, isSimulated)
+        return@ensureTerminalInitialized
+      }
+      if (!isLocationServicesEnabled()) {
+        Log.d("StripeTerminal", "EagerPrepare: Location services disabled")
+        return@ensureTerminalInitialized
+      }
+
+      // Step 4: Discover + Connect in background
+      startEagerDiscoveryAndConnect(terminal, locationId, isSimulated)
+    }
+  }
+
+  /**
+   * Background reader discovery and connection for eager initialization.
+   */
+  private fun startEagerDiscoveryAndConnect(terminal: Terminal, locationId: String, isSimulated: Boolean) {
+    if (isConnectingReader.getAndSet(true)) {
+      Log.d("StripeTerminal", "EagerPrepare: Already connecting, skip")
+      return
+    }
+
+    Log.d("StripeTerminal", "EagerPrepare: Starting discovery...")
+    sendProgress(1, "Connecting...")
+
+    val config = DiscoveryConfiguration.TapToPayDiscoveryConfiguration(isSimulated)
+    discoveryCancelable = terminal.discoverReaders(config, object : DiscoveryListener {
+      override fun onUpdateDiscoveredReaders(readers: List<Reader>) {
+        val reader = readers.firstOrNull() ?: return
+        discoveryCancelable?.cancel(object : Callback {
+          override fun onSuccess() {
+            discoveryCancelable = null
+            connectEagerReader(terminal, reader, locationId)
+          }
+          override fun onFailure(e: TerminalException) {
+            discoveryCancelable = null
+            connectEagerReader(terminal, reader, locationId)
+          }
+        })
+      }
+    }, object : Callback {
+      override fun onSuccess() { /* discovery completed naturally */ }
+      override fun onFailure(e: TerminalException) {
+        isConnectingReader.set(false)
+        discoveryCancelable = null
+        Log.w("StripeTerminal", "EagerPrepare: Discovery failed: ${e.message}")
+      }
+    })
+  }
+
+  /**
+   * Connect to a discovered reader in the eager init background pipeline.
+   */
+  private fun connectEagerReader(terminal: Terminal, reader: Reader, locationId: String) {
+    Log.d("StripeTerminal", "EagerPrepare: Connecting to reader...")
+    sendProgress(2, "Downloading...")
+
+    val cConfig = ConnectionConfiguration.TapToPayConnectionConfiguration(
+      locationId,
+      autoReconnectOnUnexpectedDisconnect = true,
+      tapToPayReaderListener = null
+    )
+    terminal.connectReader(reader, cConfig, object : ReaderCallback {
+      override fun onSuccess(r: Reader) {
+        isConnectingReader.set(false)
+        Log.d("StripeTerminal", "EagerPrepare: Reader connected ✅")
+        sendProgress(3, "Ready!")
+      }
+      override fun onFailure(e: TerminalException) {
+        isConnectingReader.set(false)
+        Log.w("StripeTerminal", "EagerPrepare: Connect failed: ${e.message}")
+      }
+    })
+  }
+
+  /**
+   * Wait for an in-progress reader connection to complete.
+   * Polls every 300ms for up to 15 seconds.
+   */
+  private fun awaitReaderConnection(
+    maxWaitMs: Long = 15_000,
+    onConnected: (Reader) -> Unit,
+    onTimeout: () -> Unit
+  ) {
+    val startTime = System.currentTimeMillis()
+    val poller = object : Runnable {
+      override fun run() {
+        Terminal.getInstance().connectedReader?.let {
+          onConnected(it)
+          return
+        }
+        // If no longer connecting and not connected → attempt finished (failed)
+        if (!isConnectingReader.get()) {
+          onTimeout()
+          return
+        }
+        // Still connecting — check timeout
+        if (System.currentTimeMillis() - startTime > maxWaitMs) {
+          onTimeout()
+          return
+        }
+        mainHandler.postDelayed(this, 300)
+      }
+    }
+    mainHandler.post(poller)
+  }
+
   private fun getNfcStatus(res: MethodChannel.Result) {
     val s = packageManager.hasSystemFeature(PackageManager.FEATURE_NFC)
     val e = NfcAdapter.getDefaultAdapter(this)?.isEnabled == true
@@ -636,6 +917,21 @@ class MainActivity : FlutterActivity(), TerminalListener {
     } else if (requestCode == microphonePermissionRequestCode) {
       pendingMicrophoneResult?.success(grantResults.all { it == PackageManager.PERMISSION_GRANTED })
       pendingMicrophoneResult = null
+    } else if (requestCode == eagerPermissionRequestCode) {
+      val allGranted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+      Log.d("StripeTerminal", "Eager permissions result: allGranted=$allGranted")
+      // If location was granted and we have pending eager config, start background connect
+      if (allGranted) {
+        eagerPrepareConfig?.let { (url, locId, isSim) ->
+          if (Terminal.isInitialized()) {
+            val terminal = Terminal.getInstance()
+            if (terminal.connectedReader == null && !isConnectingReader.get()) {
+              startEagerDiscoveryAndConnect(terminal, locId, isSim)
+            }
+          }
+          eagerPrepareConfig = null
+        }
+      }
     } else super.onRequestPermissionsResult(requestCode, permissions, grantResults)
   }
 
