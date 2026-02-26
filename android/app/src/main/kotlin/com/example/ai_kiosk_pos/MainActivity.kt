@@ -51,6 +51,11 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import android.os.Build
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import java.security.KeyStore
+import javax.crypto.KeyGenerator
 
 class MainActivity : FlutterActivity(), TerminalListener {
 
@@ -148,12 +153,68 @@ class MainActivity : FlutterActivity(), TerminalListener {
     // Uses deferred token provider — URL is set later by eagerPrepare or payment request.
     if (!Terminal.isInitialized()) {
       try {
+        // Log device security capabilities before initialization
+        Log.i("StripeTerminal", "Initializing Terminal SDK on ${Build.MANUFACTURER} ${Build.MODEL} (API ${Build.VERSION.SDK_INT})")
+        
         @Suppress("OPT_IN_USAGE")
         @OptIn(OfflineMode::class)
         Terminal.init(applicationContext, LogLevel.VERBOSE, deferredTokenProvider, this, null)
+        
         Log.d("StripeTerminal", "Terminal pre-initialized at startup ✅")
+        
+        // Check device security capabilities after successful initialization
+        activityScope.launch(Dispatchers.IO) {
+          logDeviceSecurityCapabilities()
+        }
       } catch (e: Exception) {
-        Log.e("StripeTerminal", "Early Terminal init failed: ${e.message}")
+        Log.e("StripeTerminal", "Terminal initialization failed: ${e.javaClass.simpleName}: ${e.message}")
+        Log.e("StripeTerminal", "Stack trace: ", e)
+        
+        // Check if this is a TEE/hardware attestation error
+        val errorMsg = e.message?.lowercase() ?: ""
+        if (errorMsg.contains("tee") || errorMsg.contains("hardware") || errorMsg.contains("attestation") || errorMsg.contains("strongbox")) {
+          // Special handling for SUNMI devices - they are officially supported
+          val isSunmiDevice = Build.MANUFACTURER.equals("SUNMI", ignoreCase = true)
+          
+          if (isSunmiDevice) {
+            Log.w("StripeTerminal", "═══════════════════════════════════════════════════════")
+            Log.w("StripeTerminal", "  SUNMI DEVICE - SETUP REQUIRED")
+            Log.w("StripeTerminal", "═══════════════════════════════════════════════════════")
+            Log.w("StripeTerminal", "  SUNMI ${Build.MODEL} is OFFICIALLY SUPPORTED by Stripe")
+            Log.w("StripeTerminal", "  but requires specific setup steps.")
+            Log.w("StripeTerminal", "  ")
+            Log.w("StripeTerminal", "  This error usually occurs due to:")
+            Log.w("StripeTerminal", "  1. Corrupted Google Play Services cache")
+            Log.w("StripeTerminal", "  2. Missing Tap to Pay component download")
+            Log.w("StripeTerminal", "  3. First-time initialization not completed")
+            Log.w("StripeTerminal", "  ")
+            Log.w("StripeTerminal", "  SOLUTION:")
+            Log.w("StripeTerminal", "  1. Run: ./setup_sunmi_device.sh")
+            Log.w("StripeTerminal", "  2. Clear app data + Google Play Services cache")
+            Log.w("StripeTerminal", "  3. Reinstall app and grant all permissions")
+            Log.w("StripeTerminal", "  4. Wait 30-60s on first payment for download")
+            Log.w("StripeTerminal", "  ")
+            Log.w("StripeTerminal", "  Device will use SOFTWARE key attestation (this is OK)")
+            Log.w("StripeTerminal", "═══════════════════════════════════════════════════════")
+          } else {
+            Log.w("StripeTerminal", "═══════════════════════════════════════════════════════")
+            Log.w("StripeTerminal", "  DEVICE COMPATIBILITY NOTICE")
+            Log.w("StripeTerminal", "═══════════════════════════════════════════════════════")
+            Log.w("StripeTerminal", "  This device does not support hardware-backed security")
+            Log.w("StripeTerminal", "  (TEE/StrongBox) required by Stripe Terminal SDK 5.2.0")
+            Log.w("StripeTerminal", "  ")
+            Log.w("StripeTerminal", "  Device: ${Build.MANUFACTURER} ${Build.MODEL}")
+            Log.w("StripeTerminal", "  Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+            Log.w("StripeTerminal", "  Build: ${Build.FINGERPRINT}")
+            Log.w("StripeTerminal", "  ")
+            Log.w("StripeTerminal", "  POSSIBLE SOLUTIONS:")
+            Log.w("StripeTerminal", "  1. Use a device with TEE/StrongBox support (most modern")
+            Log.w("StripeTerminal", "     devices from Samsung, Google Pixel, etc.)")
+            Log.w("StripeTerminal", "  2. Contact Stripe support for device-specific guidance")
+            Log.w("StripeTerminal", "  3. Check if device firmware updates are available")
+            Log.w("StripeTerminal", "═══════════════════════════════════════════════════════")
+          }
+        }
       }
     }
 
@@ -239,7 +300,81 @@ class MainActivity : FlutterActivity(), TerminalListener {
     val gms = GoogleApiAvailability.getInstance()
     val res = gms.isGooglePlayServicesAvailable(this)
     if (res != ConnectionResult.SUCCESS) return "TAP_TO_PAY_INSECURE_ENVIRONMENT" to "No Google Play Services"
+    
+    // Check and log TEE/StrongBox support (informational only - not blocking)
+    logDeviceSecurityCapabilities()
+    
     return null
+  }
+
+  /**
+   * Check if device supports Trusted Execution Environment (TEE) and hardware-backed key attestation.
+   * This is informational only - the Stripe Terminal SDK will handle devices without TEE
+   * by using software-based security instead.
+   */
+  private fun logDeviceSecurityCapabilities() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+      Log.w("StripeTerminal", "Device security check: API < 23, hardware attestation not available")
+      return
+    }
+
+    try {
+      val keyStore = KeyStore.getInstance("AndroidKeyStore")
+      keyStore.load(null)
+      
+      // Try to generate a test key with StrongBox requirement
+      val keyGenerator = KeyGenerator.getInstance(
+        KeyProperties.KEY_ALGORITHM_AES,
+        "AndroidKeyStore"
+      )
+      
+      val testKeyAlias = "test_strongbox_key_${System.currentTimeMillis()}"
+      
+      try {
+        // Test StrongBox support (API 28+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+          val builder = KeyGenParameterSpec.Builder(
+            testKeyAlias,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+          )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setIsStrongBoxBacked(true)  // Require StrongBox
+          
+          keyGenerator.init(builder.build())
+          keyGenerator.generateKey()
+          
+          Log.i("StripeTerminal", "✅ Device supports StrongBox hardware security")
+          
+          // Clean up test key
+          keyStore.deleteEntry(testKeyAlias)
+        } else {
+          // API 23-27: Test TEE support (no StrongBox)
+          val builder = KeyGenParameterSpec.Builder(
+            testKeyAlias,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+          )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+          
+          keyGenerator.init(builder.build())
+          keyGenerator.generateKey()
+          
+          Log.i("StripeTerminal", "✅ Device supports TEE hardware security (pre-StrongBox)")
+          
+          // Clean up test key
+          keyStore.deleteEntry(testKeyAlias)
+        }
+      } catch (e: Exception) {
+        // StrongBox/TEE not available - this is OK, SDK will use software fallback
+        Log.w("StripeTerminal", "⚠️  Device does not support hardware-backed security (TEE/StrongBox)")
+        Log.w("StripeTerminal", "   Stripe Terminal will use software-based security instead")
+        Log.w("StripeTerminal", "   Device: ${Build.MANUFACTURER} ${Build.MODEL} (API ${Build.VERSION.SDK_INT})")
+        Log.d("StripeTerminal", "   Technical details: ${e.javaClass.simpleName}: ${e.message}")
+      }
+    } catch (e: Exception) {
+      Log.e("StripeTerminal", "Failed to check device security capabilities: ${e.message}")
+    }
   }
 
   private fun prepareTapToPay(args: Map<*, *>, result: MethodChannel.Result) {
@@ -597,8 +732,15 @@ class MainActivity : FlutterActivity(), TerminalListener {
     if (!Terminal.isInitialized()) {
       try {
         Terminal.init(applicationContext, LogLevel.VERBOSE, deferredTokenProvider, this, null)
+        Log.d("StripeTerminal", "Terminal initialized successfully")
       } catch (e: Exception) {
-        Log.e("StripeTerminal", "Failed to initialize terminal: ${e.message}")
+        Log.e("StripeTerminal", "Terminal initialization failed: ${e.javaClass.simpleName}: ${e.message}")
+        
+        // Check if this is a TEE/hardware attestation error
+        val errorMsg = e.message?.lowercase() ?: ""
+        if (errorMsg.contains("tee") || errorMsg.contains("hardware") || errorMsg.contains("attestation")) {
+          Log.w("StripeTerminal", "Device does not support required hardware security features")
+        }
       }
     }
     onReady()

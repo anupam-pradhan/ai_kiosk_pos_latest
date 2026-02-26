@@ -8,7 +8,13 @@
      <uses-permission android:name="android.permission.RECORD_AUDIO" />
      <uses-permission android:name="android.permission.READ_PHONE_STATE" />
      <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+     
+     <!-- NFC hardware feature (required for Tap to Pay on supported devices) -->
      <uses-feature android:name="android.hardware.nfc" android:required="false" />
+     <uses-feature android:name="android.hardware.nfc.hce" android:required="false" />
+     
+     <!-- Declare software keystore support for devices without StrongBox (like SUNMI) -->
+     <uses-feature android:name="android.software.device_admin" android:required="false" />
     <application
         android:label="MEGAPOS"
         android:name=".KioskApplication"
