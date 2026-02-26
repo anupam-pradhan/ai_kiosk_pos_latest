@@ -45,6 +45,10 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   Timer? _retryTimer;
   int _retryCount = 0;
 
+  /// Tracks whether we've had a successful payment → reader is connected.
+  /// When true, skip the prepare dialog entirely for instant NFC screen.
+  bool _readerConnected = false;
+
   /// Stream that receives real-time TTP progress events from native.
   /// Native sends: {step: 0-3, message: String}
   final StreamController<Map<String, dynamic>> _ttpProgressController =
@@ -110,7 +114,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
       final url = prefs.getString('cached_terminal_base_url') ?? '';
       final locId = prefs.getString('cached_stripe_location_id') ?? '';
       if (url.isEmpty || locId.isEmpty) {
-        debugPrint('⏭️ Eager TTP skipped: no cached terminal config yet (first launch)');
+        debugPrint(
+          '⏭️ Eager TTP skipped: no cached terminal config yet (first launch)',
+        );
         return;
       }
       debugPrint('🚀 Eager TTP prepare starting (cached: $url)');
@@ -127,7 +133,10 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
 
   /// Cache terminal config from the webview payment request into SharedPreferences.
   /// Called on every payment so eager init works on next app launch.
-  Future<void> _cacheTerminalConfig(String terminalBaseUrl, String locationId) async {
+  Future<void> _cacheTerminalConfig(
+    String terminalBaseUrl,
+    String locationId,
+  ) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('cached_terminal_base_url', terminalBaseUrl);
@@ -824,6 +833,8 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                 onLoadStop: (controller, url) {
                   if (!mounted) return;
                   _pageLoaded = true;
+                  _retryCount = 0; // Reset retry counter on successful load
+                  _retryTimer?.cancel();
                   _maybeHideSplash();
                   setState(() {
                     _isPageLoading = false;
@@ -843,6 +854,15 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                   // Ignore subframe errors or non-critical resource failures
                   if (request.isForMainFrame != true) return;
 
+                  // CRITICAL: Never auto-retry during payment processing.
+                  // When the Stripe NFC activity is shown, the Flutter activity
+                  // goes to background and the webview may fire spurious errors.
+                  // Reloading here would nuke the web app's payment state.
+                  if (_isPaymentProcessing) {
+                    debugPrint('⏭️ Ignoring webview error during payment: ${error.description}');
+                    return;
+                  }
+
                   _pageLoaded = true;
                   _maybeHideSplash();
 
@@ -850,7 +870,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                   if (_retryCount < 5) {
                     _retryTimer?.cancel();
                     _retryTimer = Timer(const Duration(seconds: 5), () {
-                      if (mounted) {
+                      if (mounted && !_isPaymentProcessing) {
                         _webViewController?.reload();
                       }
                     });
@@ -991,18 +1011,22 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           locationId as String,
                         );
 
-                        if (mounted) {
-                          setState(() {
-                            // Don't set _isPaymentProcessing=true yet; waiting for prep dialog
-                            _isPaymentProcessing = false;
-                          });
+                        // Only show the prepare dialog on the FIRST payment
+                        // (when reader hasn't been connected yet). On subsequent
+                        // payments the reader is already connected, so go
+                        // straight to NFC — this saves 2-5 seconds.
+                        if (!_readerConnected) {
+                          if (mounted) {
+                            setState(() {
+                              _isPaymentProcessing = false;
+                            });
+                          }
+                          await _showTtpPrepareDialog(
+                            terminalBaseUrl: terminalBaseUrl as String,
+                            locationId: locationId as String,
+                            isSimulated: AppConfig.isTapToPaySimulated,
+                          );
                         }
-                        // Show animated progress dialog while TTP component downloads
-                        await _showTtpPrepareDialog(
-                          terminalBaseUrl: terminalBaseUrl as String,
-                          locationId: locationId as String,
-                          isSimulated: AppConfig.isTapToPaySimulated,
-                        );
                         if (mounted) {
                           setState(() {
                             _isPaymentProcessing = true;
@@ -1021,6 +1045,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                                 "isSimulated": AppConfig.isTapToPaySimulated,
                               })
                               .timeout(_tapToPayTimeout);
+
+                          // Reader is confirmed connected — skip prepare dialog on next payment
+                          _readerConnected = true;
 
                           await _notifyWebStatus({
                             "ok": true,
@@ -1050,6 +1077,18 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           return timeoutPayload;
                         } on PlatformException catch (e) {
                           final normalizedCode = _normalizeCode(e.code);
+
+                          // Connection-related errors mean reader may have disconnected
+                          const readerLostCodes = {
+                            "CONNECT_FAILED",
+                            "NO_READER_FOUND",
+                            "DISCOVERY_TIMEOUT",
+                            "DISCOVERY_FAILED",
+                            "READER_ERROR",
+                          };
+                          if (readerLostCodes.contains(normalizedCode)) {
+                            _readerConnected = false;
+                          }
 
                           // Device capability errors: silently redirect to card flow
                           // (no dialog shown — same behavior as old APK)
