@@ -695,6 +695,54 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     }
   }
 
+  /// Shows a modern tap-to-pay instruction overlay before the NFC screen.
+  /// Auto-dismisses after 3 seconds so the NFC screen appears seamlessly.
+  Future<void> _showTapToPayInstruction({
+    required int amountCents,
+    required String currency,
+  }) async {
+    if (!mounted) return;
+
+    String amountStr = '';
+    if (amountCents > 0) {
+      final amount = amountCents / 100.0;
+      final cur = currency.toLowerCase();
+      final sym = switch (cur) {
+        'gbp' => '£',
+        'usd' => '\$',
+        'eur' => '€',
+        _ => '${currency.toUpperCase()} ',
+      };
+      amountStr = '$sym${amount.toStringAsFixed(2)}';
+    }
+
+    await showGeneralDialog(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black.withOpacity(0.6),
+      transitionDuration: const Duration(milliseconds: 350),
+      transitionBuilder: (ctx, anim, secondAnim, child) {
+        return FadeTransition(
+          opacity: CurvedAnimation(parent: anim, curve: Curves.easeOut),
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.92, end: 1.0).animate(
+              CurvedAnimation(parent: anim, curve: Curves.easeOutCubic),
+            ),
+            child: child,
+          ),
+        );
+      },
+      pageBuilder: (ctx, anim, secondAnim) {
+        return _TapToPayInstructionOverlay(
+          amountStr: amountStr,
+          onDone: () {
+            if (Navigator.of(ctx).canPop()) Navigator.of(ctx).pop();
+          },
+        );
+      },
+    );
+  }
+
   Future<void> _showPaymentSuccessDialog({
     String? last4,
     String? cardBrand,
@@ -1161,6 +1209,15 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                             _isPaymentProcessing = true;
                           });
                         }
+
+                        // Show modern tap-to-pay instruction before NFC screen
+                        await _showTapToPayInstruction(
+                          amountCents: amount is int
+                              ? amount
+                              : int.tryParse(amount.toString()) ?? 0,
+                          currency: currency?.toString() ?? 'gbp',
+                        );
+
                         _debugService.log('💳 Starting Tap to Pay payment...');
                         try {
                           final nativeRes = await DebugLogService.channel
@@ -1723,4 +1780,598 @@ class _CheckmarkPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_CheckmarkPainter old) => old.progress != progress;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Tap to Pay Instruction Overlay
+// ═══════════════════════════════════════════════════════════════════
+
+class _TapToPayInstructionOverlay extends StatefulWidget {
+  final String amountStr;
+  final VoidCallback onDone;
+
+  const _TapToPayInstructionOverlay({
+    required this.amountStr,
+    required this.onDone,
+  });
+
+  @override
+  State<_TapToPayInstructionOverlay> createState() =>
+      _TapToPayInstructionOverlayState();
+}
+
+class _TapToPayInstructionOverlayState
+    extends State<_TapToPayInstructionOverlay>
+    with TickerProviderStateMixin {
+  late final AnimationController _enterController;
+  late final AnimationController _waveController;
+  late final AnimationController _cardController;
+  late final AnimationController _glowController;
+
+  @override
+  void initState() {
+    super.initState();
+
+    // Entry animation
+    _enterController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    );
+
+    // NFC wave rings (continuous)
+    _waveController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2000),
+    );
+
+    // Card tap animation (continuous bounce toward phone)
+    _cardController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    );
+
+    // Glow pulse on the phone
+    _glowController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1800),
+    );
+
+    _startAnimations();
+  }
+
+  Future<void> _startAnimations() async {
+    await Future.delayed(const Duration(milliseconds: 80));
+    if (!mounted) return;
+    _enterController.forward();
+    _waveController.repeat();
+    _cardController.repeat();
+    _glowController.repeat(reverse: true);
+
+    // Auto-dismiss after 3 seconds
+    await Future.delayed(const Duration(seconds: 3));
+    if (mounted) widget.onDone();
+  }
+
+  @override
+  void dispose() {
+    _enterController.dispose();
+    _waveController.dispose();
+    _cardController.dispose();
+    _glowController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const brandOrange = Color(0xFFC2410C);
+    const brandDark = Color(0xFF9A3412);
+
+    final enterCurve = CurvedAnimation(
+      parent: _enterController,
+      curve: Curves.easeOutCubic,
+    );
+
+    return Material(
+      color: Colors.transparent,
+      child: Center(
+        child: AnimatedBuilder(
+          animation: _enterController,
+          builder: (_, child) {
+            final scale = Tween<double>(begin: 0.85, end: 1.0).evaluate(
+              CurvedAnimation(
+                parent: _enterController,
+                curve: Curves.elasticOut,
+              ),
+            );
+            final opacity = Tween<double>(
+              begin: 0.0,
+              end: 1.0,
+            ).evaluate(enterCurve);
+            return Transform.scale(
+              scale: scale,
+              child: Opacity(opacity: opacity, child: child),
+            );
+          },
+          child: Container(
+            width: 330,
+            padding: const EdgeInsets.fromLTRB(28, 32, 28, 24),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Colors.white, Color(0xFFFFFBF8)],
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+              ),
+              borderRadius: BorderRadius.circular(32),
+              boxShadow: [
+                BoxShadow(
+                  color: brandOrange.withOpacity(0.12),
+                  blurRadius: 50,
+                  spreadRadius: 0,
+                  offset: const Offset(0, 16),
+                ),
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.05),
+                  blurRadius: 30,
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // ── Amount badge ──
+                if (widget.amountStr.isNotEmpty) ...[
+                  _fadeSlideIn(
+                    delay: 0.0,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          colors: [brandOrange, brandDark],
+                        ),
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: [
+                          BoxShadow(
+                            color: brandOrange.withOpacity(0.3),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: Text(
+                        widget.amountStr,
+                        style: const TextStyle(
+                          fontSize: 30,
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                          letterSpacing: -0.5,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 28),
+                ],
+
+                // ── Phone + Card + NFC Waves animation ──
+                _fadeSlideIn(
+                  delay: 0.15,
+                  child: SizedBox(
+                    width: 200,
+                    height: 180,
+                    child: AnimatedBuilder(
+                      animation: Listenable.merge([
+                        _waveController,
+                        _cardController,
+                        _glowController,
+                      ]),
+                      builder: (_, __) => CustomPaint(
+                        painter: _TapToPayScenePainter(
+                          waveProgress: _waveController.value,
+                          cardProgress: _cardController.value,
+                          glowProgress: _glowController.value,
+                          brandColor: brandOrange,
+                        ),
+                        size: const Size(200, 180),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+
+                // ── Title ──
+                _fadeSlideIn(
+                  delay: 0.25,
+                  child: const Text(
+                    'Tap to Pay',
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF1D1D1F),
+                      letterSpacing: -0.5,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                _fadeSlideIn(
+                  delay: 0.3,
+                  child: const Text(
+                    'Hold your card on the back of this device',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w400,
+                      color: Color(0xFF6B7280),
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+
+                // ── Steps ──
+                _fadeSlideIn(
+                  delay: 0.4,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _buildStep('1', 'Place card', Icons.credit_card_rounded),
+                      _buildDot(),
+                      _buildStep('2', 'Hold steady', Icons.back_hand_rounded),
+                      _buildDot(),
+                      _buildStep('3', 'Done!', Icons.check_circle_rounded),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
+
+                // ── Subtle preparing indicator ──
+                _fadeSlideIn(
+                  delay: 0.5,
+                  child: AnimatedBuilder(
+                    animation: _glowController,
+                    builder: (_, __) {
+                      final opacity = 0.4 + _glowController.value * 0.3;
+                      return Opacity(
+                        opacity: opacity,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            SizedBox(
+                              width: 12,
+                              height: 12,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 1.5,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  brandOrange.withOpacity(0.6),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              'Preparing...',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey.shade400,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _fadeSlideIn({required double delay, required Widget child}) {
+    final interval = Interval(
+      delay,
+      (delay + 0.4).clamp(0.0, 1.0),
+      curve: Curves.easeOutCubic,
+    );
+    return AnimatedBuilder(
+      animation: _enterController,
+      builder: (_, __) {
+        final t = interval.transform(_enterController.value);
+        return Transform.translate(
+          offset: Offset(0, 16 * (1 - t)),
+          child: Opacity(opacity: t, child: child),
+        );
+      },
+    );
+  }
+
+  Widget _buildStep(String num, String label, IconData icon) {
+    const brandOrange = Color(0xFFC2410C);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFF2E9),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: brandOrange.withOpacity(0.15), width: 1),
+          ),
+          child: Icon(icon, size: 20, color: brandOrange),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: Color(0xFF6B7280),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDot() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 18, left: 8, right: 8),
+      child: Container(
+        width: 16,
+        height: 1.5,
+        decoration: BoxDecoration(
+          color: const Color(0xFFD1D5DB),
+          borderRadius: BorderRadius.circular(1),
+        ),
+      ),
+    );
+  }
+}
+
+/// CustomPainter that draws: phone body, NFC waves, and animated card tapping
+class _TapToPayScenePainter extends CustomPainter {
+  final double waveProgress;
+  final double cardProgress;
+  final double glowProgress;
+  final Color brandColor;
+
+  _TapToPayScenePainter({
+    required this.waveProgress,
+    required this.cardProgress,
+    required this.glowProgress,
+    required this.brandColor,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+
+    // ── Glow behind phone ──
+    final glowPaint = Paint()
+      ..color = brandColor.withOpacity(0.06 + glowProgress * 0.06)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 30);
+    canvas.drawCircle(Offset(cx, cy + 5), 55 + glowProgress * 5, glowPaint);
+
+    // ── Phone body ──
+    final phoneW = 62.0;
+    final phoneH = 110.0;
+    final phoneRect = RRect.fromRectAndRadius(
+      Rect.fromCenter(center: Offset(cx, cy), width: phoneW, height: phoneH),
+      const Radius.circular(12),
+    );
+    // Phone shadow
+    final shadowPaint = Paint()
+      ..color = Colors.black.withOpacity(0.08)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8);
+    canvas.drawRRect(phoneRect.shift(const Offset(0, 4)), shadowPaint);
+
+    // Phone fill
+    final phonePaint = Paint()
+      ..shader = const LinearGradient(
+        colors: [Color(0xFF2D3748), Color(0xFF1A202C)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ).createShader(phoneRect.outerRect);
+    canvas.drawRRect(phoneRect, phonePaint);
+
+    // Phone screen
+    final screenRect = RRect.fromRectAndRadius(
+      Rect.fromCenter(
+        center: Offset(cx, cy - 2),
+        width: phoneW - 8,
+        height: phoneH - 24,
+      ),
+      const Radius.circular(8),
+    );
+    final screenPaint = Paint()
+      ..shader = LinearGradient(
+        colors: [
+          brandColor.withOpacity(0.15 + glowProgress * 0.1),
+          brandColor.withOpacity(0.05),
+        ],
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+      ).createShader(screenRect.outerRect);
+    canvas.drawRRect(screenRect, screenPaint);
+
+    // NFC icon on screen (contactless symbol)
+    _drawNfcSymbol(canvas, Offset(cx, cy - 6), brandColor, glowProgress);
+
+    // Phone notch
+    final notchPaint = Paint()..color = const Color(0xFF1A202C);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromCenter(
+          center: Offset(cx, cy - phoneH / 2 + 8),
+          width: 20,
+          height: 4,
+        ),
+        const Radius.circular(2),
+      ),
+      notchPaint,
+    );
+
+    // ── NFC waves emanating from phone top ──
+    for (int i = 0; i < 3; i++) {
+      final waveDelay = i * 0.33;
+      final t = ((waveProgress + waveDelay) % 1.0);
+      final radius = 20.0 + t * 35;
+      final opacity = (1.0 - t) * 0.5;
+      if (opacity > 0.02) {
+        final wavePaint = Paint()
+          ..color = brandColor.withOpacity(opacity)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.0 * (1.0 - t);
+        canvas.drawArc(
+          Rect.fromCircle(center: Offset(cx, cy - 20), radius: radius),
+          -2.4, // start angle (top-left arc)
+          1.5, // sweep angle
+          false,
+          wavePaint,
+        );
+      }
+    }
+
+    // ── Animated card ──
+    _drawAnimatedCard(canvas, size, cx, cy);
+  }
+
+  void _drawNfcSymbol(Canvas canvas, Offset center, Color color, double glow) {
+    final paint = Paint()
+      ..color = color.withOpacity(0.6 + glow * 0.3)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0
+      ..strokeCap = StrokeCap.round;
+
+    // Three arcs representing NFC
+    for (int i = 0; i < 3; i++) {
+      final radius = 8.0 + i * 6.0;
+      canvas.drawArc(
+        Rect.fromCircle(center: center, radius: radius),
+        -1.2,
+        0.8,
+        false,
+        paint..color = color.withOpacity((0.7 - i * 0.15) + glow * 0.2),
+      );
+    }
+
+    // Small dot at center
+    canvas.drawCircle(
+      center,
+      2.5,
+      Paint()..color = color.withOpacity(0.7 + glow * 0.3),
+    );
+  }
+
+  void _drawAnimatedCard(Canvas canvas, Size size, double cx, double cy) {
+    // Card approaches from bottom-right and taps the phone back
+    // Use a "tap" motion: ease in, quick pull back
+    final t = cardProgress;
+    double cardY;
+    double cardX;
+    double cardAngle;
+    double cardOpacity;
+
+    if (t < 0.5) {
+      // Approach phase (0 → 0.5)
+      final approach = Curves.easeInOut.transform(t / 0.5);
+      cardX = cx + 40 - approach * 30;
+      cardY = cy + 55 - approach * 40;
+      cardAngle = -0.25 + approach * 0.1;
+      cardOpacity = 0.5 + approach * 0.5;
+    } else if (t < 0.65) {
+      // Contact/rest phase (0.5 → 0.65)
+      cardX = cx + 10;
+      cardY = cy + 15;
+      cardAngle = -0.15;
+      cardOpacity = 1.0;
+    } else {
+      // Pull back phase (0.65 → 1.0)
+      final retreat = Curves.easeIn.transform((t - 0.65) / 0.35);
+      cardX = cx + 10 + retreat * 30;
+      cardY = cy + 15 + retreat * 40;
+      cardAngle = -0.15 - retreat * 0.1;
+      cardOpacity = 1.0 - retreat * 0.5;
+    }
+
+    canvas.save();
+    canvas.translate(cardX, cardY);
+    canvas.rotate(cardAngle);
+
+    // Card shadow
+    final cardShadow = Paint()
+      ..color = Colors.black.withOpacity(0.1 * cardOpacity)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        const Rect.fromLTWH(-24, -16, 48, 32),
+        const Radius.circular(5),
+      ),
+      cardShadow,
+    );
+
+    // Card body
+    final cardPaint = Paint()
+      ..shader = LinearGradient(
+        colors: [
+          Color.lerp(
+            const Color(0xFF3B82F6),
+            const Color(0xFF1D4ED8),
+            0.5,
+          )!.withOpacity(cardOpacity),
+          const Color(0xFF1E40AF).withOpacity(cardOpacity),
+        ],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ).createShader(const Rect.fromLTWH(-24, -16, 48, 32));
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        const Rect.fromLTWH(-24, -16, 48, 32),
+        const Radius.circular(5),
+      ),
+      cardPaint,
+    );
+
+    // Card chip
+    final chipPaint = Paint()
+      ..color = const Color(0xFFEAB308).withOpacity(cardOpacity * 0.8);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        const Rect.fromLTWH(-16, -8, 10, 8),
+        const Radius.circular(1.5),
+      ),
+      chipPaint,
+    );
+
+    // Card contactless icon (tiny)
+    final nfcPaint = Paint()
+      ..color = Colors.white.withOpacity(cardOpacity * 0.6)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0;
+    for (int i = 0; i < 2; i++) {
+      canvas.drawArc(
+        Rect.fromCircle(center: const Offset(10, -2), radius: 3.0 + i * 3),
+        -1.0,
+        0.7,
+        false,
+        nfcPaint,
+      );
+    }
+
+    // Card stripe
+    final stripePaint = Paint()
+      ..color = Colors.white.withOpacity(cardOpacity * 0.15);
+    canvas.drawRect(const Rect.fromLTWH(-24, 4, 48, 5), stripePaint);
+
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_TapToPayScenePainter old) =>
+      old.waveProgress != waveProgress ||
+      old.cardProgress != cardProgress ||
+      old.glowProgress != glowProgress;
 }
