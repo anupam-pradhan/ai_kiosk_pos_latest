@@ -372,17 +372,17 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
 
     sendDebugLog("💳 Starting Tap to Pay payment")
 
-    // Device capability check
-    checkDeviceCapability()?.let { (code, msg) ->
-      sendDebugLog("❌ Device capability check failed: $msg")
-      return finishWithError(code, msg, null)
-    }
-
     val secret = args["clientSecret"] as? String
     val locId = args["locationId"] as? String
     val url = args["terminalBaseUrl"] as? String
     val orderId = args["orderId"] as? String
     val isSim = args["isSimulated"] as? Boolean ?: false
+
+    // Device capability check (skip developer options check in simulated mode)
+    checkDeviceCapability(isSim)?.let { (code, msg) ->
+      sendDebugLog("❌ Device capability check failed: $msg")
+      return finishWithError(code, msg, null)
+    }
 
     if (secret == null || url == null || locId == null) {
       sendDebugLog("❌ Missing required parameters")
@@ -1221,12 +1221,14 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
   // DEVICE CAPABILITY CHECKS
   // ═══════════════════════════════════════════════════════════
 
-  private fun checkDeviceCapability(): Pair<String, String>? {
-    // Developer options must be disabled for Tap to Pay
-    val devOpts = try {
-      Settings.Global.getInt(contentResolver, "development_settings_enabled", 0) != 0
-    } catch (_: Exception) { false }
-    if (devOpts) return "DEVELOPER_OPTIONS_ENABLED" to "Developer Options must be disabled to use Tap to Pay"
+  private fun checkDeviceCapability(isSimulated: Boolean = false): Pair<String, String>? {
+    // Developer options must be disabled for Tap to Pay (skip in simulated mode for testing)
+    if (!isSimulated) {
+      val devOpts = try {
+        Settings.Global.getInt(contentResolver, "development_settings_enabled", 0) != 0
+      } catch (_: Exception) { false }
+      if (devOpts) return "DEVELOPER_OPTIONS_ENABLED" to "Developer Options must be disabled to use Tap to Pay"
+    }
 
     val nfc = NfcAdapter.getDefaultAdapter(this)
     if (nfc == null) return "NFC_UNSUPPORTED" to "No NFC hardware"

@@ -5,7 +5,6 @@ import '../models/kiosk_mode.dart';
 import '../widgets/kiosk_mode_card.dart';
 import 'kiosk_webview_screen.dart';
 import '../services/kiosk_mode_service.dart';
-import 'debug_screen.dart';
 
 /// Screen that displays three kiosk mode options for the user to choose from
 class KioskModeSelectionScreen extends StatefulWidget {
@@ -258,25 +257,7 @@ class _KioskModeSelectionScreenState extends State<KioskModeSelectionScreen> {
                         ),
                       ),
                     ),
-                    const Spacer(flex: 1),
-                    // Debug button
-                    Center(
-                      child: TextButton.icon(
-                        onPressed: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (context) => const DebugScreen(),
-                            ),
-                          );
-                        },
-                        icon: const Icon(Icons.bug_report, size: 18),
-                        label: const Text('Debug Console'),
-                        style: TextButton.styleFrom(
-                          foregroundColor: const Color(0xFF6E6E73),
-                        ),
-                      ),
-                    ),
-                    const Spacer(flex: 1),
+                    const Spacer(flex: 2),
                   ],
                 ),
         ),

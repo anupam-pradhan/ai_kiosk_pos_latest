@@ -296,7 +296,11 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
 
   /// Returns true if developer options are OFF (safe to proceed).
   /// Shows a dialog with option to open Settings if developer options are ON.
+  /// Skips the check entirely when TAP_TO_PAY_SIMULATED is true (testing mode).
   Future<bool> _checkDeveloperOptions() async {
+    // Skip check in simulated mode so developers can test with dev options on
+    if (AppConfig.isTapToPaySimulated) return true;
+
     final status = await _getDeveloperOptionsStatus();
     final enabled = status["enabled"] == true;
     if (enabled) {
@@ -698,7 +702,8 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     String? currency,
   }) async {
     if (!mounted) return;
-    // Format amount: cents -> readable string e.g. "£12.50"
+
+    // Format amount
     String amountStr = '';
     if (amountCents != null && amountCents > 0) {
       final amount = amountCents / 100.0;
@@ -712,70 +717,30 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
       amountStr = '$currencySymbol${amount.toStringAsFixed(2)}';
     }
     final cardStr = (last4 != null && last4.isNotEmpty)
-        ? '${cardBrand != null ? '${_formatBrand(cardBrand)} ' : ''}ending in $last4'
+        ? '${cardBrand != null ? '${_formatBrand(cardBrand)} ' : ''}•••• $last4'
         : '';
-    await showDialog<void>(
+
+    await showGeneralDialog(
       context: context,
       barrierDismissible: false,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: Row(
-            children: const [
-              Icon(Icons.check_circle_outline, color: Colors.green),
-              SizedBox(width: 8),
-              Expanded(child: Text('Payment Successful')),
-            ],
+      barrierColor: Colors.black54,
+      transitionDuration: const Duration(milliseconds: 400),
+      transitionBuilder: (ctx, anim, secondAnim, child) {
+        return FadeTransition(
+          opacity: CurvedAnimation(parent: anim, curve: Curves.easeOut),
+          child: ScaleTransition(
+            scale: CurvedAnimation(parent: anim, curve: Curves.elasticOut),
+            child: child,
           ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.verified, color: Colors.green, size: 48),
-              const SizedBox(height: 12),
-              if (amountStr.isNotEmpty)
-                Text(
-                  amountStr,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w800,
-                    fontSize: 28,
-                    color: Colors.green,
-                  ),
-                ),
-              if (cardStr.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Icon(
-                      Icons.credit_card,
-                      size: 16,
-                      color: Colors.black54,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      cardStr,
-                      style: const TextStyle(
-                        color: Colors.black54,
-                        fontSize: 13,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-              const SizedBox(height: 8),
-              const Text(
-                'Your order will be prepared shortly.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.black54, fontSize: 13),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('OK'),
-            ),
-          ],
+        );
+      },
+      pageBuilder: (ctx, anim, secondAnim) {
+        return _PaymentSuccessOverlay(
+          amountStr: amountStr,
+          cardStr: cardStr,
+          onDone: () {
+            if (Navigator.of(ctx).canPop()) Navigator.of(ctx).pop();
+          },
         );
       },
     );
@@ -1423,4 +1388,339 @@ class _DotLoaderState extends State<_DotLoader>
       }),
     );
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Modern Payment Success Overlay
+// ═══════════════════════════════════════════════════════════════════
+
+class _PaymentSuccessOverlay extends StatefulWidget {
+  final String amountStr;
+  final String cardStr;
+  final VoidCallback onDone;
+
+  const _PaymentSuccessOverlay({
+    required this.amountStr,
+    required this.cardStr,
+    required this.onDone,
+  });
+
+  @override
+  State<_PaymentSuccessOverlay> createState() => _PaymentSuccessOverlayState();
+}
+
+class _PaymentSuccessOverlayState extends State<_PaymentSuccessOverlay>
+    with TickerProviderStateMixin {
+  late final AnimationController _checkController;
+  late final AnimationController _contentController;
+  late final AnimationController _pulseController;
+  late final Animation<double> _checkScale;
+  late final Animation<double> _checkOpacity;
+  late final Animation<double> _strokeProgress;
+  late final Animation<double> _contentSlide;
+  late final Animation<double> _contentOpacity;
+  late final Animation<double> _pulseScale;
+  late final Animation<double> _pulseOpacity;
+
+  @override
+  void initState() {
+    super.initState();
+
+    // Checkmark circle animation
+    _checkController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+    _checkScale = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _checkController,
+        curve: const Interval(0.0, 0.6, curve: Curves.elasticOut),
+      ),
+    );
+    _checkOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _checkController,
+        curve: const Interval(0.0, 0.3, curve: Curves.easeOut),
+      ),
+    );
+    _strokeProgress = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _checkController,
+        curve: const Interval(0.3, 1.0, curve: Curves.easeInOut),
+      ),
+    );
+
+    // Content slide-up animation
+    _contentController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    );
+    _contentSlide = Tween<double>(begin: 30.0, end: 0.0).animate(
+      CurvedAnimation(parent: _contentController, curve: Curves.easeOutCubic),
+    );
+    _contentOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _contentController, curve: Curves.easeOut),
+    );
+
+    // Pulse ring animation
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    );
+    _pulseScale = Tween<double>(
+      begin: 1.0,
+      end: 1.6,
+    ).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeOut));
+    _pulseOpacity = Tween<double>(
+      begin: 0.4,
+      end: 0.0,
+    ).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeOut));
+
+    _startAnimations();
+  }
+
+  Future<void> _startAnimations() async {
+    await Future.delayed(const Duration(milliseconds: 100));
+    if (!mounted) return;
+    _checkController.forward();
+    _pulseController.forward();
+    await Future.delayed(const Duration(milliseconds: 400));
+    if (!mounted) return;
+    _contentController.forward();
+
+    // Auto-dismiss after 3 seconds
+    await Future.delayed(const Duration(seconds: 3));
+    if (mounted) widget.onDone();
+  }
+
+  @override
+  void dispose() {
+    _checkController.dispose();
+    _contentController.dispose();
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const successGreen = Color(0xFF22C55E);
+    const darkGreen = Color(0xFF16A34A);
+
+    return Material(
+      color: Colors.transparent,
+      child: Center(
+        child: Container(
+          width: 300,
+          padding: const EdgeInsets.symmetric(vertical: 40, horizontal: 24),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(28),
+            boxShadow: [
+              BoxShadow(
+                color: successGreen.withOpacity(0.25),
+                blurRadius: 40,
+                spreadRadius: 0,
+                offset: const Offset(0, 10),
+              ),
+              BoxShadow(
+                color: Colors.black.withOpacity(0.08),
+                blurRadius: 20,
+                spreadRadius: 0,
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Animated checkmark with pulse ring
+              SizedBox(
+                width: 100,
+                height: 100,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    // Pulse ring
+                    AnimatedBuilder(
+                      animation: _pulseController,
+                      builder: (_, __) => Transform.scale(
+                        scale: _pulseScale.value,
+                        child: Opacity(
+                          opacity: _pulseOpacity.value,
+                          child: Container(
+                            width: 80,
+                            height: 80,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(color: successGreen, width: 3),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Green circle + checkmark
+                    AnimatedBuilder(
+                      animation: _checkController,
+                      builder: (_, __) => Transform.scale(
+                        scale: _checkScale.value,
+                        child: Opacity(
+                          opacity: _checkOpacity.value,
+                          child: Container(
+                            width: 80,
+                            height: 80,
+                            decoration: const BoxDecoration(
+                              shape: BoxShape.circle,
+                              gradient: LinearGradient(
+                                colors: [successGreen, darkGreen],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Color(0x4022C55E),
+                                  blurRadius: 20,
+                                  spreadRadius: 2,
+                                ),
+                              ],
+                            ),
+                            child: CustomPaint(
+                              painter: _CheckmarkPainter(
+                                progress: _strokeProgress.value,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+              // Content with slide animation
+              AnimatedBuilder(
+                animation: _contentController,
+                builder: (_, __) => Transform.translate(
+                  offset: Offset(0, _contentSlide.value),
+                  child: Opacity(
+                    opacity: _contentOpacity.value,
+                    child: Column(
+                      children: [
+                        const Text(
+                          'Payment Successful',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF1D1D1F),
+                            letterSpacing: -0.3,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        if (widget.amountStr.isNotEmpty)
+                          Text(
+                            widget.amountStr,
+                            style: const TextStyle(
+                              fontSize: 36,
+                              fontWeight: FontWeight.w800,
+                              color: darkGreen,
+                              letterSpacing: -0.5,
+                            ),
+                          ),
+                        if (widget.cardStr.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF0FDF4),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.credit_card,
+                                  size: 14,
+                                  color: Color(0xFF6B7280),
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  widget.cardStr,
+                                  style: const TextStyle(
+                                    color: Color(0xFF6B7280),
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 16),
+                        const Text(
+                          'Your order will be prepared shortly',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Color(0xFF9CA3AF),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w400,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Custom painter for the animated checkmark stroke
+class _CheckmarkPainter extends CustomPainter {
+  final double progress;
+  _CheckmarkPainter({required this.progress});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (progress <= 0) return;
+
+    final paint = Paint()
+      ..color = Colors.white
+      ..strokeWidth = 4.0
+      ..strokeCap = StrokeCap.round
+      ..style = PaintingStyle.stroke;
+
+    final path = Path();
+    // Checkmark points relative to center
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    final startX = cx - 14;
+    final startY = cy + 2;
+    final midX = cx - 4;
+    final midY = cy + 12;
+    final endX = cx + 16;
+    final endY = cy - 10;
+
+    path.moveTo(startX, startY);
+
+    if (progress <= 0.5) {
+      // First segment of checkmark
+      final t = progress / 0.5;
+      path.lineTo(startX + (midX - startX) * t, startY + (midY - startY) * t);
+    } else {
+      // First segment complete, draw second
+      path.lineTo(midX, midY);
+      final t = (progress - 0.5) / 0.5;
+      path.lineTo(midX + (endX - midX) * t, midY + (endY - midY) * t);
+    }
+
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(_CheckmarkPainter old) => old.progress != progress;
 }
