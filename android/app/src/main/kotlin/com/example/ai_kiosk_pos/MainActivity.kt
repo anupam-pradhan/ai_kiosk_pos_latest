@@ -25,8 +25,10 @@ import com.stripe.stripeterminal.external.callable.ConnectionTokenProvider
 import com.stripe.stripeterminal.external.callable.DiscoveryListener
 import com.stripe.stripeterminal.external.callable.PaymentIntentCallback
 import com.stripe.stripeterminal.external.callable.ReaderCallback
+import com.stripe.stripeterminal.external.callable.TapToPayReaderListener
 import com.stripe.stripeterminal.external.callable.TerminalListener
-import com.stripe.stripeterminal.external.models.CollectPaymentIntentConfiguration
+import com.stripe.stripeterminal.external.models.CollectConfiguration
+import com.stripe.stripeterminal.external.models.DisconnectReason
 import com.stripe.stripeterminal.external.models.ConnectionConfiguration
 import com.stripe.stripeterminal.external.models.ConnectionStatus
 import com.stripe.stripeterminal.external.models.ConnectionTokenException
@@ -67,7 +69,7 @@ import javax.crypto.KeyGenerator
  * - Clean error recovery on every code path
  * - cancelPayment() callable from Flutter
  */
-class MainActivity : FlutterActivity(), TerminalListener {
+class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener {
 
   companion object {
     private const val TAG = "StripeTerminal"
@@ -275,7 +277,7 @@ class MainActivity : FlutterActivity(), TerminalListener {
       sendDebugLog("🔧 Initializing Terminal SDK on ${Build.MANUFACTURER} ${Build.MODEL}")
 
       val logLevel = if (BuildConfig.DEBUG) LogLevel.VERBOSE else LogLevel.NONE
-      Terminal.init(applicationContext, logLevel, deferredTokenProvider, this)
+      Terminal.initTerminal(applicationContext, logLevel, deferredTokenProvider, this)
 
       Log.d(TAG, "Terminal pre-initialized at startup ✅")
       sendDebugLog("✅ Terminal pre-initialized successfully")
@@ -342,7 +344,7 @@ class MainActivity : FlutterActivity(), TerminalListener {
     if (!Terminal.isInitialized()) {
       try {
         val logLevel = if (BuildConfig.DEBUG) LogLevel.VERBOSE else LogLevel.NONE
-        Terminal.init(applicationContext, logLevel, deferredTokenProvider, this)
+        Terminal.initTerminal(applicationContext, logLevel, deferredTokenProvider, this)
         Log.d(TAG, "Terminal initialized (late init)")
         sendDebugLog("✅ Terminal initialized (late init)")
       } catch (e: Exception) {
@@ -560,7 +562,7 @@ class MainActivity : FlutterActivity(), TerminalListener {
     val config = ConnectionConfiguration.TapToPayConnectionConfiguration(
       locId,
       autoReconnectOnUnexpectedDisconnect = true,
-      tapToPayReaderListener = null
+      tapToPayReaderListener = this@MainActivity
     )
     terminal.connectReader(reader, config, object : ReaderCallback {
       override fun onSuccess(connectedReader: Reader) {
@@ -607,7 +609,7 @@ class MainActivity : FlutterActivity(), TerminalListener {
     val terminal = Terminal.getInstance()
     ttpActivityLaunched = true
 
-    val config = CollectPaymentIntentConfiguration.Builder().build()
+    val config = CollectConfiguration.Builder().build()
     currentPaymentCancelable = terminal.collectPaymentMethod(intent, object : PaymentIntentCallback {
       override fun onSuccess(collected: PaymentIntent) {
         sendDebugLog("✅ Payment method collected")
@@ -907,7 +909,7 @@ class MainActivity : FlutterActivity(), TerminalListener {
       val config = ConnectionConfiguration.TapToPayConnectionConfiguration(
         locationId,
         autoReconnectOnUnexpectedDisconnect = true,
-        tapToPayReaderListener = null
+        tapToPayReaderListener = this@MainActivity
       )
 
       Terminal.getInstance().connectReader(reader, config, object : ReaderCallback {
@@ -1066,7 +1068,7 @@ class MainActivity : FlutterActivity(), TerminalListener {
     val config = ConnectionConfiguration.TapToPayConnectionConfiguration(
       locationId,
       autoReconnectOnUnexpectedDisconnect = true,
-      tapToPayReaderListener = null
+      tapToPayReaderListener = this@MainActivity
     )
     terminal.connectReader(reader, config, object : ReaderCallback {
       override fun onSuccess(r: Reader) {
@@ -1411,24 +1413,42 @@ class MainActivity : FlutterActivity(), TerminalListener {
   // TERMINAL LISTENER (SDK 4.x)
   // ═══════════════════════════════════════════════════════════
 
-  override fun onUnexpectedReaderDisconnect(reader: Reader) {
-    Log.w(TAG, "Reader unexpectedly disconnected: ${reader.label}")
-    sendDebugLog("⚠️ Reader disconnected unexpectedly")
-    // Reset connection state so next payment attempt will reconnect
-    isConnectingReader.set(false)
-    // Notify Flutter side so it resets _readerConnected flag
-    // This ensures the next payment shows the prepare dialog for proper reconnection
-    mainHandler.post {
-      methodChannel?.invokeMethod("onReaderDisconnected", mapOf("label" to (reader.label ?: "unknown")))
-    }
-  }
-
   override fun onConnectionStatusChange(status: ConnectionStatus) {
     Log.d(TAG, "Connection status: $status")
   }
 
   override fun onPaymentStatusChange(status: PaymentStatus) {
     Log.d(TAG, "Payment status: $status")
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // TAP TO PAY READER LISTENER (SDK 4.x)
+  // ═══════════════════════════════════════════════════════════
+
+  override fun onDisconnect(reason: DisconnectReason) {
+    Log.w(TAG, "Reader disconnected: $reason")
+    sendDebugLog("⚠️ Reader disconnected: $reason")
+    // Reset connection state so next payment attempt will reconnect
+    isConnectingReader.set(false)
+    // Notify Flutter side so it resets _readerConnected flag
+    mainHandler.post {
+      methodChannel?.invokeMethod("onReaderDisconnected", mapOf("reason" to reason.toString()))
+    }
+  }
+
+  override fun onReaderReconnectStarted(reader: Reader, cancelReconnect: Cancelable, reason: DisconnectReason) {
+    Log.w(TAG, "Reader reconnect started: $reason")
+    sendDebugLog("🔄 Reader reconnecting...")
+  }
+
+  override fun onReaderReconnectSucceeded(reader: Reader) {
+    Log.d(TAG, "Reader reconnected successfully")
+    sendDebugLog("✅ Reader reconnected")
+  }
+
+  override fun onReaderReconnectFailed(reader: Reader) {
+    Log.w(TAG, "Reader reconnect failed")
+    sendDebugLog("❌ Reader reconnect failed")
   }
 
   // ═══════════════════════════════════════════════════════════

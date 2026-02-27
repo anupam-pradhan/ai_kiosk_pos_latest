@@ -72,8 +72,8 @@ class DebugLogService {
         break;
       case 'onReaderDisconnected':
         final args = call.arguments;
-        final label = args is Map ? args['label'] ?? 'unknown' : 'unknown';
-        _addLog('⚠️ Reader disconnected: $label');
+        final reason = args is Map ? args['reason'] ?? 'unknown' : 'unknown';
+        _addLog('⚠️ Reader disconnected: $reason');
         _readerDisconnectedController.add(true);
         break;
       case 'onReaderConnected':
