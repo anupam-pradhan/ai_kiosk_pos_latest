@@ -192,8 +192,10 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
         "requestMicrophonePermission" -> requestMicrophonePermission(result)
         "getNfcStatus"    -> getNfcStatus(result)
         "getLocationStatus" -> getLocationStatus(result)
+        "getDeveloperOptionsStatus" -> getDeveloperOptionsStatus(result)
         "openNfcSettings" -> { openNfcSettings(); result.success(true) }
         "openLocationSettings" -> { openLocationSettings(); result.success(true) }
+        "openDeveloperSettings" -> { openDeveloperSettings(); result.success(true) }
         "prewarmupNfc"    -> prewarmupNfc(args, result)
         "eagerPrepare"    -> eagerPrepare(args, result)
         "getDeviceInfo"   -> getDeviceInfo(result)
@@ -1220,6 +1222,12 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
   // ═══════════════════════════════════════════════════════════
 
   private fun checkDeviceCapability(): Pair<String, String>? {
+    // Developer options must be disabled for Tap to Pay
+    val devOpts = try {
+      Settings.Global.getInt(contentResolver, "development_settings_enabled", 0) != 0
+    } catch (_: Exception) { false }
+    if (devOpts) return "DEVELOPER_OPTIONS_ENABLED" to "Developer Options must be disabled to use Tap to Pay"
+
     val nfc = NfcAdapter.getDefaultAdapter(this)
     if (nfc == null) return "NFC_UNSUPPORTED" to "No NFC hardware"
     if (!nfc.isEnabled) return "NFC_DISABLED" to "NFC disabled"
@@ -1407,6 +1415,17 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
 
   private fun openLocationSettings() {
     startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+  }
+
+  private fun getDeveloperOptionsStatus(res: MethodChannel.Result) {
+    val enabled = try {
+      Settings.Global.getInt(contentResolver, "development_settings_enabled", 0) != 0
+    } catch (_: Exception) { false }
+    res.success(mapOf("enabled" to enabled))
+  }
+
+  private fun openDeveloperSettings() {
+    startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
   }
 
   // ═══════════════════════════════════════════════════════════

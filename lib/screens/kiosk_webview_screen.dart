@@ -141,6 +141,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _checkNfcOnResume();
+      _checkDeveloperOptionsOnResume();
     }
   }
 
@@ -269,6 +270,78 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     return true;
   }
 
+  Future<Map<String, dynamic>> _getDeveloperOptionsStatus() async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return {"enabled": false};
+    }
+    try {
+      final res = await DebugLogService.channel.invokeMethod<dynamic>(
+        "getDeveloperOptionsStatus",
+      );
+      if (res is Map) return Map<String, dynamic>.from(res);
+    } on PlatformException {
+      return {"enabled": false};
+    }
+    return {"enabled": false};
+  }
+
+  Future<void> _openDeveloperSettings() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await DebugLogService.channel.invokeMethod<void>("openDeveloperSettings");
+    } on PlatformException {
+      // Best-effort only; ignore failures.
+    }
+  }
+
+  /// Returns true if developer options are OFF (safe to proceed).
+  /// Shows a dialog with option to open Settings if developer options are ON.
+  Future<bool> _checkDeveloperOptions() async {
+    final status = await _getDeveloperOptionsStatus();
+    final enabled = status["enabled"] == true;
+    if (enabled) {
+      await _showDeveloperOptionsDialog();
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _showDeveloperOptionsDialog() async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Row(
+            children: const [
+              Icon(Icons.developer_mode, color: Colors.orange),
+              SizedBox(width: 8),
+              Expanded(child: Text("Disable Developer Mode")),
+            ],
+          ),
+          content: const Text(
+            "Tap to Pay requires Developer Options to be disabled for security. "
+            "Please go to Settings > Developer Options and turn it OFF, then try again.",
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text("Cancel"),
+            ),
+            TextButton(
+              onPressed: () async {
+                Navigator.of(dialogContext).pop();
+                await _openDeveloperSettings();
+              },
+              child: const Text("Open Settings"),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Future<void> _showLocationDisabledDialog() async {
     if (!mounted) return;
     await showDialog<void>(
@@ -353,6 +426,16 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
       }
     } finally {
       _nfcResumeCheckInFlight = false;
+    }
+  }
+
+  /// Re-check developer options when returning from Settings.
+  /// If user just disabled dev options, they can proceed with next payment.
+  Future<void> _checkDeveloperOptionsOnResume() async {
+    final status = await _getDeveloperOptionsStatus();
+    final enabled = status["enabled"] == true;
+    if (enabled) {
+      _debugService.log('⚠️ Developer Options still enabled');
     }
   }
 
@@ -1038,6 +1121,19 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           return errorPayload;
                         }
 
+                        // Check Developer Options BEFORE starting payment
+                        final devOptsOk = await _checkDeveloperOptions();
+                        if (!devOptsOk) {
+                          final errorPayload = _buildFallbackPayload(
+                            code: "DEVELOPER_OPTIONS_ENABLED",
+                            reason: "DEVELOPER_OPTIONS_ENABLED",
+                            message:
+                                "Developer Options must be disabled to use Tap to Pay.",
+                          );
+                          await _notifyWebStatus(errorPayload);
+                          return errorPayload;
+                        }
+
                         final amount = payload["amount"];
                         final currency = payload["currency"];
                         final orderId = payload["orderId"];
@@ -1170,6 +1266,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                             // Covers: no TEE, outdated security patch, rooted device,
                             // developer options on, hardware keystore missing
                             "TAP_TO_PAY_INSECURE_ENVIRONMENT",
+                            "DEVELOPER_OPTIONS_ENABLED",
                             "READER_ERROR",
                             "CONTACTLESS_TRANSACTION_FAILED",
                             "LOCATION_SERVICES_DISABLED",
