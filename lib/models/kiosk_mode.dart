@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 /// Enum representing different kiosk modes
-enum KioskModeType { kiosk, largeKiosk, pos, mobileKiosk }
+enum KioskModeType { kiosk, largeKiosk, pos, mobileKiosk, testDevice }
 
 /// Model class representing a kiosk mode option
 class KioskMode {

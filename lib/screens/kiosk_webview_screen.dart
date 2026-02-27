@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/app_config.dart';
+import '../services/debug_log_service.dart';
 
 /// Screen that displays the kiosk web application in a webview
 class KioskWebViewScreen extends StatefulWidget {
@@ -25,10 +26,8 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   static const Duration _tapToPayTimeout = Duration(seconds: 120);
   late final String kioskUrl = widget.kioskUrl;
 
-  // Dart -> Native Android bridge
-  static const MethodChannel terminalChannel = MethodChannel(
-    "kiosk.stripe.terminal",
-  );
+  // Use centralized debug log service for all native communication
+  final DebugLogService _debugService = DebugLogService();
 
   InAppWebViewController? _webViewController;
   bool _isPageLoading = true;
@@ -44,52 +43,35 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   bool _nfcResumeCheckInFlight = false;
   Timer? _retryTimer;
   int _retryCount = 0;
+  StreamSubscription<bool>? _readerDisconnectSub;
+  StreamSubscription<bool>? _readerConnectSub;
 
   /// Tracks whether we've had a successful payment → reader is connected.
   /// When true, skip the prepare dialog entirely for instant NFC screen.
   bool _readerConnected = false;
-
-  /// Stream that receives real-time TTP progress events from native.
-  /// Native sends: {step: 0-3, message: String}
-  final StreamController<Map<String, dynamic>> _ttpProgressController =
-      StreamController<Map<String, dynamic>>.broadcast();
-
-  static const Set<String> _fallbackEligibleCodes = {
-    "UNSUPPORTED_OS",
-    "UNSUPPORTED_DEVICE",
-    "NFC_UNSUPPORTED",
-    "NFC_DISABLED",
-    "LOCATION_SERVICES_DISABLED",
-    "TAP_TO_PAY_INSECURE_ENVIRONMENT",
-    "READER_ERROR",
-    "CONTACTLESS_TRANSACTION_FAILED",
-    "PROCESS_FAILED",
-    "RETRIEVE_FAILED",
-    "INIT_FAILED",
-    "INVALID_ARGUMENTS",
-    "BASE_URL_CHANGED",
-    "PAYMENT_ALREADY_IN_PROGRESS",
-    "BUSY",
-    "PAYMENT_TIMEOUT",
-    "PAYMENT_CANCELLED",
-    "SERVER_UNREACHABLE",
-  };
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
 
-    // Handle native → Flutter calls on the terminal channel.
-    // This receives real-time TTP progress events from MainActivity.
-    terminalChannel.setMethodCallHandler((call) async {
-      if (call.method == 'onTtpProgress') {
-        final args = call.arguments;
-        if (args is Map) {
-          _ttpProgressController.add(Map<String, dynamic>.from(args));
-        }
-      }
-      return null;
+    // Log webview initialization
+    _debugService.log('🌐 WebView screen initialized');
+
+    // Listen for unexpected reader disconnections from native side
+    // Resets _readerConnected so next payment shows prepare dialog
+    _readerDisconnectSub = _debugService.readerDisconnectedStream.listen((_) {
+      _readerConnected = false;
+      _debugService.log(
+        '⚠️ Reader disconnected — next payment will re-prepare',
+      );
+    });
+
+    // Listen for reader connected events from eagerPrepare background connect
+    // When reader connects in background, first payment skips prepare dialog entirely
+    _readerConnectSub = _debugService.readerConnectedStream.listen((_) {
+      _readerConnected = true;
+      _debugService.log('✅ Reader pre-connected — payments will be instant');
     });
 
     // Eagerly prepare Tap to Pay in background for faster first payment.
@@ -119,13 +101,13 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
         );
         return;
       }
-      debugPrint('🚀 Eager TTP prepare starting (cached: $url)');
-      await terminalChannel.invokeMethod('eagerPrepare', {
+      _debugService.log('🚀 Eager TTP prepare starting (cached: $url)');
+      await DebugLogService.channel.invokeMethod('eagerPrepare', {
         'terminalBaseUrl': url,
         'locationId': locId,
         'isSimulated': AppConfig.isTapToPaySimulated,
       });
-      debugPrint('✅ Eager TTP prepare dispatched');
+      _debugService.log('✅ Eager TTP prepare dispatched');
     } catch (e) {
       debugPrint('⚠️ Eager TTP prepare failed (non-critical): $e');
     }
@@ -149,9 +131,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    terminalChannel.setMethodCallHandler(null);
-    _ttpProgressController.close();
     _retryTimer?.cancel();
+    _readerDisconnectSub?.cancel();
+    _readerConnectSub?.cancel();
     super.dispose();
   }
 
@@ -234,7 +216,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
       return {"supported": true, "enabled": true};
     }
     try {
-      final res = await terminalChannel.invokeMethod<dynamic>("getNfcStatus");
+      final res = await DebugLogService.channel.invokeMethod<dynamic>(
+        "getNfcStatus",
+      );
       if (res is Map) return Map<String, dynamic>.from(res);
     } on PlatformException {
       return {"supported": false, "enabled": false};
@@ -245,10 +229,79 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   Future<void> _openNfcSettings() async {
     if (defaultTargetPlatform != TargetPlatform.android) return;
     try {
-      await terminalChannel.invokeMethod<void>("openNfcSettings");
+      await DebugLogService.channel.invokeMethod<void>("openNfcSettings");
     } on PlatformException {
       // Best-effort only; ignore failures.
     }
+  }
+
+  Future<Map<String, dynamic>> _getLocationStatus() async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return {"hasPermission": true, "enabled": true};
+    }
+    try {
+      final res = await DebugLogService.channel.invokeMethod<dynamic>(
+        "getLocationStatus",
+      );
+      if (res is Map) return Map<String, dynamic>.from(res);
+    } on PlatformException {
+      return {"hasPermission": false, "enabled": false};
+    }
+    return {"hasPermission": false, "enabled": false};
+  }
+
+  Future<void> _openLocationSettings() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await DebugLogService.channel.invokeMethod<void>("openLocationSettings");
+    } on PlatformException {
+      // Best-effort only; ignore failures.
+    }
+  }
+
+  Future<bool> _checkLocationServicesEnabled() async {
+    final status = await _getLocationStatus();
+    final enabled = status["enabled"] == true;
+    if (!enabled) {
+      await _showLocationDisabledDialog();
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _showLocationDisabledDialog() async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Row(
+            children: const [
+              Icon(Icons.location_off, color: Colors.orange),
+              SizedBox(width: 8),
+              Expanded(child: Text("Enable Location")),
+            ],
+          ),
+          content: const Text(
+            "Tap to Pay needs Location services enabled. Please enable Location in settings to continue.",
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text("Cancel"),
+            ),
+            TextButton(
+              onPressed: () async {
+                Navigator.of(dialogContext).pop();
+                await _openLocationSettings();
+              },
+              child: const Text("Open Settings"),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> _checkNfcOnStartup() async {
@@ -394,7 +447,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
 
     // Start native prepare call in parallel (60s timeout for slow component downloads)
     Map<dynamic, dynamic> prepareResult = {'status': 'UNKNOWN'};
-    final prepareFuture = terminalChannel
+    final prepareFuture = DebugLogService.channel
         .invokeMethod('prepareTapToPay', {
           'terminalBaseUrl': terminalBaseUrl,
           'locationId': locationId,
@@ -413,8 +466,8 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
           return prepareResult;
         });
 
-    // Listen to REAL native progress events
-    final progressSub = _ttpProgressController.stream.listen((event) {
+    // Listen to REAL native progress events from centralized service
+    final progressSub = _debugService.ttpProgressStream.listen((event) {
       if (isDone || dialogSetState == null) return;
       final step = event['step'] as int? ?? currentStep;
       final msg =
@@ -859,7 +912,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                   // goes to background and the webview may fire spurious errors.
                   // Reloading here would nuke the web app's payment state.
                   if (_isPaymentProcessing) {
-                    debugPrint('⏭️ Ignoring webview error during payment: ${error.description}');
+                    debugPrint(
+                      '⏭️ Ignoring webview error during payment: ${error.description}',
+                    );
                     return;
                   }
 
@@ -896,9 +951,8 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                     if (mounted) {
                       setState(() => _isMicRequesting = true);
                     }
-                    final granted = await terminalChannel.invokeMethod<bool>(
-                      "requestMicrophonePermission",
-                    );
+                    final granted = await DebugLogService.channel
+                        .invokeMethod<bool>("requestMicrophonePermission");
                     if (mounted) {
                       setState(() => _isMicRequesting = false);
                     }
@@ -970,6 +1024,20 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           return errorPayload;
                         }
 
+                        // Check Location services BEFORE starting payment
+                        final locationOk =
+                            await _checkLocationServicesEnabled();
+                        if (!locationOk) {
+                          final errorPayload = _buildFallbackPayload(
+                            code: "LOCATION_SERVICES_DISABLED",
+                            reason: "LOCATION_SERVICES_DISABLED",
+                            message:
+                                "Location services disabled. Enable Location to use Tap to Pay.",
+                          );
+                          await _notifyWebStatus(errorPayload);
+                          return errorPayload;
+                        }
+
                         final amount = payload["amount"];
                         final currency = payload["currency"];
                         final orderId = payload["orderId"];
@@ -1022,8 +1090,8 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                             });
                           }
                           await _showTtpPrepareDialog(
-                            terminalBaseUrl: terminalBaseUrl as String,
-                            locationId: locationId as String,
+                            terminalBaseUrl: terminalBaseUrl,
+                            locationId: locationId,
                             isSimulated: AppConfig.isTapToPaySimulated,
                           );
                         }
@@ -1032,8 +1100,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                             _isPaymentProcessing = true;
                           });
                         }
+                        _debugService.log('💳 Starting Tap to Pay payment...');
                         try {
-                          final nativeRes = await terminalChannel
+                          final nativeRes = await DebugLogService.channel
                               .invokeMethod("startTapToPay", {
                                 "amount": amount,
                                 "currency": currency,
@@ -1048,6 +1117,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
 
                           // Reader is confirmed connected — skip prepare dialog on next payment
                           _readerConnected = true;
+                          _debugService.log('✅ Payment completed successfully');
 
                           await _notifyWebStatus({
                             "ok": true,
@@ -1056,7 +1126,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           });
 
                           final resMap = nativeRes is Map
-                              ? Map<String, dynamic>.from(nativeRes as Map)
+                              ? Map<String, dynamic>.from(nativeRes)
                               : <String, dynamic>{};
                           await _showPaymentSuccessDialog(
                             last4: resMap['last4'] as String?,

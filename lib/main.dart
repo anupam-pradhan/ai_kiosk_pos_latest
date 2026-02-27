@@ -6,10 +6,13 @@ import 'config/app_config.dart';
 import 'screens/kiosk_mode_selection_screen.dart';
 import 'screens/kiosk_webview_screen.dart';
 import 'services/kiosk_mode_service.dart';
-import 'services/nfc_terminal_service.dart';
+import 'services/debug_log_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize debug log service FIRST to capture all native events
+  DebugLogService().initialize();
 
   try {
     await dotenv.load(fileName: '.env');
@@ -23,16 +26,14 @@ Future<void> main() async {
   // Print configuration in debug mode
   AppConfig.printConfig();
 
-  // Initialize Stripe Terminal with prewarmup for faster payment sheet opening
+  // Initialize Stripe Terminal (native code handles SDK init)
   try {
     // Stripe Terminal is initialized in native code (Android/KioskApplication.kt)
+    // eagerPrepare in KioskWebViewScreen handles reader discovery + connection
+    // from cached config — no separate prewarmup needed here.
     if (kDebugMode) {
-      print('Stripe Terminal SDK 5.2.0 initialized');
+      print('Stripe Terminal SDK 4.7.6 ready');
     }
-
-    // Start NFC prewarmup in background on app startup
-    // This initializes the reader discovery early so NFC is ready when user needs it
-    NFCTerminalService.initializeNfcOnStartup();
   } catch (e) {
     if (kDebugMode) {
       print('Warning: Stripe initialization: $e');

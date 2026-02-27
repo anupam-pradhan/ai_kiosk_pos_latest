@@ -5,6 +5,7 @@ import '../models/kiosk_mode.dart';
 import '../widgets/kiosk_mode_card.dart';
 import 'kiosk_webview_screen.dart';
 import '../services/kiosk_mode_service.dart';
+import 'debug_screen.dart';
 
 /// Screen that displays three kiosk mode options for the user to choose from
 class KioskModeSelectionScreen extends StatefulWidget {
@@ -167,7 +168,7 @@ class _KioskModeSelectionScreenState extends State<KioskModeSelectionScreen> {
                             final maxWidth = isNarrow ? 400.0 : 800.0;
                             final maxHeight = isNarrow ? 320.0 : 200.0;
 
-                            // 2x2 Grid layout for mobile
+                            // 2x2 Grid layout for mobile (3 cards: 2 on top, 1 centered on bottom)
                             if (isNarrow) {
                               return ConstrainedBox(
                                 constraints: BoxConstraints(
@@ -176,6 +177,7 @@ class _KioskModeSelectionScreenState extends State<KioskModeSelectionScreen> {
                                 ),
                                 child: Column(
                                   children: [
+                                    // First row: KIOSK and LARGE KIOSK
                                     Expanded(
                                       child: Row(
                                         children: [
@@ -200,22 +202,23 @@ class _KioskModeSelectionScreenState extends State<KioskModeSelectionScreen> {
                                       ),
                                     ),
                                     const SizedBox(height: 15),
+                                    // Second row: POS (centered)
                                     Expanded(
                                       child: Row(
                                         children: [
-                                          const Spacer(),
-                                          SizedBox(
-                                            width: (maxWidth - 10) / 2,
+                                          Expanded(child: SizedBox.shrink()),
+                                          Expanded(
+                                            flex: 2,
                                             child: KioskModeCard(
                                               mode: kioskModes[2],
                                               onTap: () => _openKioskMode(
                                                 context,
                                                 kioskModes[2],
                                               ),
-                                              useExpanded: false,
+                                              useExpanded: true,
                                             ),
                                           ),
-                                          const Spacer(),
+                                          Expanded(child: SizedBox.shrink()),
                                         ],
                                       ),
                                     ),
@@ -255,7 +258,25 @@ class _KioskModeSelectionScreenState extends State<KioskModeSelectionScreen> {
                         ),
                       ),
                     ),
-                    const Spacer(flex: 2),
+                    const Spacer(flex: 1),
+                    // Debug button
+                    Center(
+                      child: TextButton.icon(
+                        onPressed: () {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (context) => const DebugScreen(),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.bug_report, size: 18),
+                        label: const Text('Debug Console'),
+                        style: TextButton.styleFrom(
+                          foregroundColor: const Color(0xFF6E6E73),
+                        ),
+                      ),
+                    ),
+                    const Spacer(flex: 1),
                   ],
                 ),
         ),
