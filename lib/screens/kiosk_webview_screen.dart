@@ -737,8 +737,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
         return TapToPayInstructionOverlay(
           amountStr: amountStr,
           deviceModel: 'SUNMI Flex 3',
-          nfcHint:
-              'Exact spot: back upper-center, about 1-2 cm below camera module',
+          nfcHint: 'Hold Here',
           onDone: () {
             if (Navigator.of(ctx).canPop()) Navigator.of(ctx).pop();
           },

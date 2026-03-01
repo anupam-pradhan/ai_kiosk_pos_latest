@@ -385,7 +385,7 @@ class TapToPayInstructionOverlay extends StatefulWidget {
     required this.amountStr,
     required this.onDone,
     this.deviceModel = 'SUNMI Flex 3',
-    this.nfcHint = 'Exact spot: back upper-center, 1-2 cm below camera module',
+    this.nfcHint = 'Hold Here',
   });
 
   final String amountStr;
@@ -444,7 +444,6 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
   @override
   Widget build(BuildContext context) {
     const brandOrange = Color(0xFFC2410C);
-    const brandDark = Color(0xFF9A3412);
 
     return Material(
       color: Colors.transparent,
@@ -521,10 +520,10 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
                                     ),
                                     SizedBox(height: 4),
                                     Text(
-                                      'Place the card exactly on the highlighted NFC target',
+                                      'Hold Here',
                                       style: TextStyle(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w500,
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w700,
                                         color: Color(0xFF4B5563),
                                       ),
                                     ),
@@ -539,7 +538,7 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
                                   ),
                                   decoration: BoxDecoration(
                                     gradient: const LinearGradient(
-                                      colors: [brandOrange, brandDark],
+                                      colors: [brandOrange, Color(0xFF9A3412)],
                                     ),
                                     borderRadius: BorderRadius.circular(14),
                                   ),
@@ -555,7 +554,7 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
                                 ),
                             ],
                           ),
-                          const SizedBox(height: 14),
+                          const SizedBox(height: 12),
                           Expanded(
                             child: Center(
                               child: Container(
@@ -583,25 +582,6 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
                                 child: Column(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 12,
-                                        vertical: 5,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFFFF2E9),
-                                        borderRadius: BorderRadius.circular(16),
-                                      ),
-                                      child: Text(
-                                        widget.deviceModel,
-                                        style: const TextStyle(
-                                          color: brandDark,
-                                          fontWeight: FontWeight.w800,
-                                          fontSize: 12,
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 12),
                                     SizedBox(
                                       width: sceneWidth,
                                       height: sceneHeight,
@@ -641,33 +621,24 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
                             ),
                             child: Column(
                               children: [
-                                Text(
-                                  widget.nfcHint,
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w700,
-                                    color: Color(0xFF1F2937),
-                                    height: 1.35,
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                                const Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  alignment: WrapAlignment.center,
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
                                   children: [
-                                    _StepPill(
-                                      label: '1. Place card',
-                                      icon: Icons.credit_card,
+                                    const Icon(
+                                      Icons.nfc,
+                                      color: Color(0xFFC2410C),
+                                      size: 18,
                                     ),
-                                    _StepPill(
-                                      label: '2. Hold still',
-                                      icon: Icons.timer,
-                                    ),
-                                    _StepPill(
-                                      label: '3. Wait beep',
-                                      icon: Icons.check_circle_outline,
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      widget.nfcHint,
+                                      textAlign: TextAlign.center,
+                                      style: const TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w800,
+                                        color: Color(0xFF1F2937),
+                                        height: 1.2,
+                                      ),
                                     ),
                                   ],
                                 ),
@@ -688,40 +659,6 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
   }
 }
 
-class _StepPill extends StatelessWidget {
-  const _StepPill({required this.label, required this.icon});
-
-  final String label;
-  final IconData icon;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF8FAFC),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFE2E8F0)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 12, color: const Color(0xFF6B7280)),
-          const SizedBox(width: 4),
-          Text(
-            label,
-            style: const TextStyle(
-              fontSize: 11,
-              color: Color(0xFF6B7280),
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _SunmiFlex3TapScenePainter extends CustomPainter {
   _SunmiFlex3TapScenePainter({
     required this.pulseProgress,
@@ -735,7 +672,7 @@ class _SunmiFlex3TapScenePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final phoneWidth = size.width * 0.36;
+    final phoneWidth = size.width * 0.34;
     final phoneHeight = size.height * 0.74;
     final phoneRect = RRect.fromRectAndRadius(
       Rect.fromCenter(
@@ -743,7 +680,7 @@ class _SunmiFlex3TapScenePainter extends CustomPainter {
         width: phoneWidth,
         height: phoneHeight,
       ),
-      const Radius.circular(16),
+      const Radius.circular(18),
     );
 
     final shadowPaint = Paint()
@@ -751,38 +688,46 @@ class _SunmiFlex3TapScenePainter extends CustomPainter {
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8);
     canvas.drawRRect(phoneRect.shift(const Offset(0, 4)), shadowPaint);
 
-    final bodyPaint = Paint()
+    final phoneBodyPaint = Paint()
       ..shader = const LinearGradient(
-        colors: [Color(0xFF1F2937), Color(0xFF111827)],
+        colors: [Color(0xFF0F172A), Color(0xFF111827)],
         begin: Alignment.topLeft,
         end: Alignment.bottomRight,
       ).createShader(phoneRect.outerRect);
-    canvas.drawRRect(phoneRect, bodyPaint);
+    canvas.drawRRect(phoneRect, phoneBodyPaint);
 
-    final cameraRect = RRect.fromRectAndRadius(
+    final screenRect = RRect.fromRectAndRadius(
       Rect.fromLTWH(
-        phoneRect.left + 10,
-        phoneRect.top + 14,
-        phoneWidth * 0.34,
-        phoneHeight * 0.11,
+        phoneRect.left + 5,
+        phoneRect.top + 8,
+        phoneWidth - 10,
+        phoneHeight - 16,
       ),
-      const Radius.circular(6),
+      const Radius.circular(14),
     );
-    canvas.drawRRect(cameraRect, Paint()..color = const Color(0xFF374151));
-    canvas.drawCircle(
-      Offset(cameraRect.left + 8, cameraRect.center.dy),
-      4,
-      Paint()..color = const Color(0xFF111827),
+    final screenPaint = Paint()
+      ..shader = LinearGradient(
+        colors: [
+          const Color(0xFF111827).withValues(alpha: 0.96),
+          const Color(0xFF1F2937).withValues(alpha: 0.96),
+        ],
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+      ).createShader(screenRect.outerRect);
+    canvas.drawRRect(screenRect, screenPaint);
+
+    final notchRect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(phoneRect.center.dx - 12, phoneRect.top + 14, 24, 4),
+      const Radius.circular(2),
     );
-    canvas.drawCircle(
-      Offset(cameraRect.left + 18, cameraRect.center.dy),
-      4,
-      Paint()..color = const Color(0xFF111827),
+    canvas.drawRRect(
+      notchRect,
+      Paint()..color = Colors.white.withValues(alpha: 0.22),
     );
 
     final nfcCenter = Offset(
       phoneRect.center.dx,
-      phoneRect.top + phoneHeight * 0.26,
+      phoneRect.top + phoneHeight * 0.5,
     );
 
     final zonePaint = Paint()
@@ -817,11 +762,26 @@ class _SunmiFlex3TapScenePainter extends CustomPainter {
       canvas.drawCircle(nfcCenter, radius, ringPaint);
     }
 
-    final labelLeft = (nfcCenter.dx + 24)
-        .clamp(10.0, size.width - 92.0)
+    final guideStart = Offset(nfcCenter.dx + 104, nfcCenter.dy + 86);
+    final guideEnd = Offset(nfcCenter.dx + 12, nfcCenter.dy + 12);
+    final guidePaint = Paint()
+      ..color = brandColor.withValues(alpha: 0.48)
+      ..strokeWidth = 1.8
+      ..style = PaintingStyle.stroke;
+    _drawDashedLine(canvas, guideStart, guideEnd, guidePaint);
+    final trailT = Curves.easeInOut.transform((cardProgress * 1.15) % 1.0);
+    final trailDot = Offset.lerp(guideStart, guideEnd, trailT) ?? guideEnd;
+    canvas.drawCircle(
+      trailDot,
+      3.5,
+      Paint()..color = brandColor.withValues(alpha: 0.95),
+    );
+
+    final labelLeft = (nfcCenter.dx + 20)
+        .clamp(10.0, size.width - 120.0)
         .toDouble();
     final labelRect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(labelLeft, nfcCenter.dy - 12, 80, 24),
+      Rect.fromLTWH(labelLeft, nfcCenter.dy - 12, 104, 24),
       const Radius.circular(10),
     );
     canvas.drawRRect(labelRect, Paint()..color = const Color(0xFFFFF2E9));
@@ -834,7 +794,7 @@ class _SunmiFlex3TapScenePainter extends CustomPainter {
     );
     final textPainter = TextPainter(
       text: TextSpan(
-        text: 'Tap here',
+        text: 'Hold Here',
         style: TextStyle(
           color: brandColor,
           fontSize: 10,
@@ -843,21 +803,69 @@ class _SunmiFlex3TapScenePainter extends CustomPainter {
       ),
       textDirection: TextDirection.ltr,
     )..layout();
-    textPainter.paint(canvas, Offset(labelRect.left + 13, labelRect.top + 6));
+    textPainter.paint(canvas, Offset(labelRect.left + 15, labelRect.top + 7));
 
-    _drawCard(canvas, nfcCenter);
+    _drawFrontTapBadge(canvas, phoneRect);
+    _drawPaymentDevice(canvas, nfcCenter);
   }
 
-  void _drawCard(Canvas canvas, Offset nfcCenter) {
-    final t = cardProgress;
-    final approach = t < 0.72
-        ? Curves.easeOutCubic.transform(t / 0.72)
-        : 1.0 - Curves.easeIn.transform((t - 0.72) / 0.28) * 0.32;
+  void _drawFrontTapBadge(Canvas canvas, RRect phoneRect) {
+    final badgeRect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(phoneRect.left - 2, phoneRect.top - 26, 82, 20),
+      const Radius.circular(10),
+    );
+    canvas.drawRRect(
+      badgeRect,
+      Paint()..color = const Color(0xFF111827).withValues(alpha: 0.84),
+    );
+    final badgeTextPainter = TextPainter(
+      text: const TextSpan(
+        text: 'HOLD HERE',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: 9,
+          letterSpacing: 0.2,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    badgeTextPainter.paint(
+      canvas,
+      Offset(badgeRect.left + 8, badgeRect.top + 5),
+    );
+  }
 
-    final start = Offset(nfcCenter.dx + 108, nfcCenter.dy + 84);
-    final end = Offset(nfcCenter.dx + 12, nfcCenter.dy + 10);
+  void _drawDashedLine(Canvas canvas, Offset start, Offset end, Paint paint) {
+    const dashWidth = 6.0;
+    const dashSpace = 5.0;
+    final totalLength = (end - start).distance;
+    final direction = (end - start) / totalLength;
+    double distance = 0.0;
+    while (distance < totalLength) {
+      final dashStart = start + direction * distance;
+      final dashEnd =
+          start + direction * (distance + dashWidth).clamp(0, totalLength);
+      canvas.drawLine(dashStart, dashEnd, paint);
+      distance += dashWidth + dashSpace;
+    }
+  }
+
+  void _drawPaymentDevice(Canvas canvas, Offset nfcCenter) {
+    final t = cardProgress;
+    double approach;
+    if (t < 0.55) {
+      approach = Curves.easeOutCubic.transform(t / 0.55);
+    } else if (t < 0.85) {
+      approach = 1.0; // Hold at tap point
+    } else {
+      approach = 1.0 - Curves.easeIn.transform((t - 0.85) / 0.15) * 0.2;
+    }
+
+    final start = Offset(nfcCenter.dx + 100, nfcCenter.dy + 88);
+    final end = Offset(nfcCenter.dx + 10, nfcCenter.dy + 10);
     final current = Offset.lerp(start, end, approach) ?? end;
-    final angle = -0.24 + (approach * 0.07);
+    final angle = -0.22 + (approach * 0.05);
 
     canvas.save();
     canvas.translate(current.dx, current.dy);
@@ -865,8 +873,8 @@ class _SunmiFlex3TapScenePainter extends CustomPainter {
 
     canvas.drawRRect(
       RRect.fromRectAndRadius(
-        const Rect.fromLTWH(-30, -20, 60, 40),
-        const Radius.circular(7),
+        const Rect.fromLTWH(-20, -34, 40, 68),
+        const Radius.circular(10),
       ),
       Paint()
         ..color = Colors.black.withValues(alpha: 0.12)
@@ -875,28 +883,42 @@ class _SunmiFlex3TapScenePainter extends CustomPainter {
 
     canvas.drawRRect(
       RRect.fromRectAndRadius(
-        const Rect.fromLTWH(-30, -20, 60, 40),
-        const Radius.circular(7),
+        const Rect.fromLTWH(-20, -34, 40, 68),
+        const Radius.circular(10),
       ),
       Paint()
         ..shader = const LinearGradient(
-          colors: [Color(0xFF3B82F6), Color(0xFF1E3A8A)],
+          colors: [Color(0xFF60A5FA), Color(0xFF1D4ED8)],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-        ).createShader(const Rect.fromLTWH(-30, -20, 60, 40)),
+        ).createShader(const Rect.fromLTWH(-20, -34, 40, 68)),
     );
 
     canvas.drawRRect(
       RRect.fromRectAndRadius(
-        const Rect.fromLTWH(-20, -10, 12, 10),
-        const Radius.circular(2),
+        const Rect.fromLTWH(-15, -28, 30, 48),
+        const Radius.circular(6),
       ),
-      Paint()..color = const Color(0xFFFCD34D),
+      Paint()..color = Colors.white.withValues(alpha: 0.16),
     );
 
-    canvas.drawRect(
-      const Rect.fromLTWH(-30, 5, 60, 7),
-      Paint()..color = Colors.white.withValues(alpha: 0.15),
+    final nfcPaint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.76)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2;
+    for (var i = 0; i < 2; i++) {
+      canvas.drawArc(
+        Rect.fromCircle(center: const Offset(4, -1), radius: 5.0 + i * 3.0),
+        -1.1,
+        0.85,
+        false,
+        nfcPaint,
+      );
+    }
+    canvas.drawCircle(
+      const Offset(2, 0),
+      1.2,
+      Paint()..color = Colors.white.withValues(alpha: 0.85),
     );
 
     canvas.restore();
