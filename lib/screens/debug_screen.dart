@@ -6,7 +6,7 @@ import '../services/debug_log_service.dart';
 /// Debug overlay screen for viewing Stripe Terminal logs and device info
 /// Access by triple-tapping the app bar or through debug menu
 class DebugScreen extends StatefulWidget {
-  const DebugScreen({Key? key}) : super(key: key);
+  const DebugScreen({super.key});
 
   @override
   State<DebugScreen> createState() => _DebugScreenState();

@@ -522,9 +522,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     // Steps map native step index → display message
     // Native sends step 0=Initializing, 1=Connecting, 2=Downloading, 3=Ready
     const stepMessages = [
-      'Initializing payment terminal...',
-      'Connecting to payment reader...',
-      'Downloading payment component...',
+      'Preparing Tap to Pay...',
+      'Preparing Tap to Pay...',
+      'Preparing Tap to Pay...',
       'Payment reader ready!',
     ];
 
@@ -558,12 +558,11 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     final progressSub = _debugService.ttpProgressStream.listen((event) {
       if (isDone || dialogSetState == null) return;
       final step = event['step'] as int? ?? currentStep;
-      final msg =
-          event['message'] as String? ??
-          stepMessages[math.min(step, stepMessages.length - 1)];
       dialogSetState!(() {
         currentStep = math.min(step, stepMessages.length - 1);
-        currentMessage = msg;
+        // Keep customer-facing copy stable; native can emit technical messages
+        // like "Downloading..." that should not be shown in the UI.
+        currentMessage = stepMessages[currentStep];
       });
     });
 
@@ -1191,11 +1190,11 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           locationId as String,
                         );
 
-                        // Only show the prepare dialog on the FIRST payment
-                        // (when reader hasn't been connected yet). On subsequent
-                        // payments the reader is already connected, so go
-                        // straight to NFC — this saves 2-5 seconds.
-                        if (!_readerConnected) {
+                        // Optional prepare dialog for first payment.
+                        // By default we skip this popup and start payment
+                        // immediately; native startTapToPay will discover/connect.
+                        if (!_readerConnected &&
+                            AppConfig.showTapToPayPrepareDialog) {
                           if (mounted) {
                             setState(() {
                               _isPaymentProcessing = false;

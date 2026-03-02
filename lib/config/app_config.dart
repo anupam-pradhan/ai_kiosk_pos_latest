@@ -23,6 +23,18 @@ class AppConfig {
     return raw.toLowerCase() == 'true';
   }
 
+  /// Controls the first-payment prepare popup (Initializing/Connecting/Downloading).
+  /// Default false: skip popup and start payment flow immediately.
+  static bool get showTapToPayPrepareDialog {
+    final raw =
+        dotenv.env['SHOW_TTP_PREPARE_DIALOG'] ??
+        const String.fromEnvironment(
+          'SHOW_TTP_PREPARE_DIALOG',
+          defaultValue: 'false',
+        );
+    return raw.toLowerCase() == 'true';
+  }
+
   // ========== TEST URL (Single URL for all modes) ==========
 
   /// Single test URL for all modes (local development)
@@ -92,6 +104,7 @@ class AppConfig {
       print('App Mode: $appMode');
       print('Is Live: $isLive');
       print('Tap to Pay Simulated: $isTapToPaySimulated');
+      print('Show TTP Prepare Dialog: $showTapToPayPrepareDialog');
       print('');
       print('--- URLs ---');
       if (!isLive) {
