@@ -14,6 +14,65 @@ class AppConfig {
   /// Check if app is running in live mode
   static bool get isLive => appMode.toLowerCase() == 'live';
 
+  /// Fixed kiosk launch mode.
+  ///
+  /// Values:
+  /// - selection (default): show mode selection flow
+  /// - kiosk
+  /// - large_kiosk
+  /// - pos
+  /// - mobile_kiosk
+  ///
+  /// `--dart-define=KIOSK_FIXED_MODE=...` takes precedence over `.env`.
+  static String get kioskFixedMode {
+    const modeFromDefine = String.fromEnvironment(
+      'KIOSK_FIXED_MODE',
+      defaultValue: '',
+    );
+    final raw = modeFromDefine.isNotEmpty
+        ? modeFromDefine
+        : (dotenv.env['KIOSK_FIXED_MODE'] ?? 'selection');
+
+    final normalized = raw.trim().toLowerCase().replaceAll('-', '_');
+    switch (normalized) {
+      case 'kiosk':
+        return 'kiosk';
+      case 'large_kiosk':
+      case 'largekiosk':
+        return 'large_kiosk';
+      case 'pos':
+        return 'pos';
+      case 'mobile_kiosk':
+      case 'mobilekiosk':
+        return 'mobile_kiosk';
+      case 'selection':
+      case 'mode_selection':
+      case 'select':
+        return 'selection';
+      default:
+        return 'selection';
+    }
+  }
+
+  /// Whether to show the mode selection screen.
+  static bool get useModeSelection => kioskFixedMode == 'selection';
+
+  /// Title used when fixed mode launch is enabled.
+  static String get fixedModeTitle {
+    switch (kioskFixedMode) {
+      case 'kiosk':
+        return 'KIOSK';
+      case 'large_kiosk':
+        return 'LARGE KIOSK';
+      case 'pos':
+        return 'POS';
+      case 'mobile_kiosk':
+        return 'MOBILE KIOSK';
+      default:
+        return 'KIOSK';
+    }
+  }
+
   /// Check if tap to pay is simulated (defaults to true in test mode, false in live)
   static bool get isTapToPaySimulated {
     final raw =
@@ -31,6 +90,18 @@ class AppConfig {
         const String.fromEnvironment(
           'SHOW_TTP_PREPARE_DIALOG',
           defaultValue: 'false',
+        );
+    return raw.toLowerCase() == 'true';
+  }
+
+  /// Controls the Tap-to-Pay instruction popup before NFC collection.
+  /// Default true: show popup. Set false to skip it.
+  static bool get showTapToPayInstructionPopup {
+    final raw =
+        dotenv.env['SHOW_TTP_INSTRUCTION_POPUP'] ??
+        const String.fromEnvironment(
+          'SHOW_TTP_INSTRUCTION_POPUP',
+          defaultValue: 'true',
         );
     return raw.toLowerCase() == 'true';
   }
@@ -97,6 +168,22 @@ class AppConfig {
   /// Get active Mobile Kiosk URL based on current mode
   static String get mobileKioskUrl => isLive ? mobileKioskUrlLive : testUrl;
 
+  /// URL used when fixed mode launch is enabled.
+  static String get fixedModeUrl {
+    switch (kioskFixedMode) {
+      case 'kiosk':
+        return kioskUrl;
+      case 'large_kiosk':
+        return largeKioskUrl;
+      case 'pos':
+        return posUrl;
+      case 'mobile_kiosk':
+        return mobileKioskUrl;
+      default:
+        return kioskUrl;
+    }
+  }
+
   /// Print current configuration (for debugging)
   static void printConfig() {
     if (kDebugMode) {
@@ -105,6 +192,10 @@ class AppConfig {
       print('Is Live: $isLive');
       print('Tap to Pay Simulated: $isTapToPaySimulated');
       print('Show TTP Prepare Dialog: $showTapToPayPrepareDialog');
+      print('Show TTP Instruction Popup: $showTapToPayInstructionPopup');
+      print(
+        'Launch Mode: ${useModeSelection ? 'selection' : 'fixed ($kioskFixedMode)'}',
+      );
       print('');
       print('--- URLs ---');
       if (!isLive) {

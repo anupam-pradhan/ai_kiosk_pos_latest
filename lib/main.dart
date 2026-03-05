@@ -66,6 +66,17 @@ class KioskAppHome extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Fixed-mode launch (no selection page), controlled by .env or --dart-define.
+    if (!AppConfig.useModeSelection) {
+      return AnimatedSplashScreen(
+        duration: const Duration(milliseconds: 2000),
+        child: KioskWebViewScreen(
+          kioskUrl: AppConfig.fixedModeUrl,
+          title: AppConfig.fixedModeTitle,
+        ),
+      );
+    }
+
     return FutureBuilder<bool>(
       future: KioskModeService.isKioskModeSelected(),
       builder: (context, snapshot) {

@@ -696,7 +696,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   }
 
   /// Shows a modern tap-to-pay instruction overlay before the NFC screen.
-  /// Auto-dismisses after 3 seconds so the NFC screen appears seamlessly.
+  /// Auto-dismisses after 5 seconds, or immediately when user taps OK.
   Future<void> _showTapToPayInstruction({
     required int amountCents,
     required String currency,
@@ -1212,13 +1212,15 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           });
                         }
 
-                        // Show modern tap-to-pay instruction before NFC screen
-                        await _showTapToPayInstruction(
-                          amountCents: amount is int
-                              ? amount
-                              : int.tryParse(amount.toString()) ?? 0,
-                          currency: currency?.toString() ?? 'gbp',
-                        );
+                        // Optional tap-to-pay instruction popup before NFC screen.
+                        if (AppConfig.showTapToPayInstructionPopup) {
+                          await _showTapToPayInstruction(
+                            amountCents: amount is int
+                                ? amount
+                                : int.tryParse(amount.toString()) ?? 0,
+                            currency: currency?.toString() ?? 'gbp',
+                          );
+                        }
 
                         _debugService.log('💳 Starting Tap to Pay payment...');
                         try {

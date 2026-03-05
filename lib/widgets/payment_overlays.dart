@@ -402,6 +402,7 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
     with TickerProviderStateMixin {
   late final AnimationController _enterController;
   late final AnimationController _countdownController;
+  bool _dismissed = false;
 
   @override
   void initState() {
@@ -412,15 +413,24 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
     );
     _countdownController = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 3),
+      duration: const Duration(seconds: 5),
     );
     _countdownController.addStatusListener((status) {
       if (status == AnimationStatus.completed && mounted) {
-        widget.onDone();
+        _dismissOverlay();
       }
     });
     _enterController.forward();
     _countdownController.forward();
+  }
+
+  void _dismissOverlay() {
+    if (_dismissed) return;
+    _dismissed = true;
+    if (_countdownController.isAnimating) {
+      _countdownController.stop();
+    }
+    widget.onDone();
   }
 
   @override
@@ -433,6 +443,10 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
   @override
   Widget build(BuildContext context) {
     const ringGreen = Color(0xFF22C55E);
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final cardWidth = (screenWidth - 32).clamp(320.0, 380.0).toDouble();
+    final ringSize = (cardWidth * 0.70).clamp(220.0, 260.0).toDouble();
+    final innerCircleSize = (ringSize * 0.78).clamp(176.0, 204.0).toDouble();
 
     return Material(
       color: Colors.transparent,
@@ -449,8 +463,8 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
                 scale: 0.94 + (0.06 * t),
                 child: Center(
                   child: Container(
-                    width: 318,
-                    padding: const EdgeInsets.fromLTRB(18, 20, 18, 16),
+                    width: cardWidth,
+                    padding: const EdgeInsets.fromLTRB(20, 22, 20, 18),
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(24),
@@ -466,8 +480,8 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         SizedBox(
-                          width: 220,
-                          height: 220,
+                          width: ringSize,
+                          height: ringSize,
                           child: Stack(
                             alignment: Alignment.center,
                             children: [
@@ -486,8 +500,8 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
                                 ),
                               ),
                               Container(
-                                width: 178,
-                                height: 178,
+                                width: innerCircleSize,
+                                height: innerCircleSize,
                                 padding: const EdgeInsets.all(18),
                                 decoration: BoxDecoration(
                                   shape: BoxShape.circle,
@@ -534,6 +548,28 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
                             ),
                           ),
                         ],
+                        const SizedBox(height: 16),
+                        SizedBox(
+                          width: double.infinity,
+                          child: FilledButton(
+                            onPressed: _dismissOverlay,
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFF16A34A),
+                              foregroundColor: Colors.white,
+                              minimumSize: const Size.fromHeight(46),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            child: const Text(
+                              'OK',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ),
                       ],
                     ),
                   ),
