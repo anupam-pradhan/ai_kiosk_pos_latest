@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 /// Central configuration class for managing app settings and environment variables
@@ -181,32 +180,6 @@ class AppConfig {
         return mobileKioskUrl;
       default:
         return kioskUrl;
-    }
-  }
-
-  /// Print current configuration (for debugging)
-  static void printConfig() {
-    if (kDebugMode) {
-      print('========== App Configuration ==========');
-      print('App Mode: $appMode');
-      print('Is Live: $isLive');
-      print('Tap to Pay Simulated: $isTapToPaySimulated');
-      print('Show TTP Prepare Dialog: $showTapToPayPrepareDialog');
-      print('Show TTP Instruction Popup: $showTapToPayInstructionPopup');
-      print(
-        'Launch Mode: ${useModeSelection ? 'selection' : 'fixed ($kioskFixedMode)'}',
-      );
-      print('');
-      print('--- URLs ---');
-      if (!isLive) {
-        print('Test URL (all modes): $testUrl');
-      } else {
-        print('Kiosk: $kioskUrl');
-        print('Large Kiosk: $largeKioskUrl');
-        print('POS: $posUrl');
-        print('Mobile Kiosk: $mobileKioskUrl');
-      }
-      print('=======================================');
     }
   }
 }

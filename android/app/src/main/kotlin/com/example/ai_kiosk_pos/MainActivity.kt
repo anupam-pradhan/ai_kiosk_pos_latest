@@ -561,6 +561,12 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
     terminal: Terminal, reader: Reader, locId: String,
     onConn: (Reader) -> Unit, onErr: (String, String) -> Unit
   ) {
+    terminal.connectedReader?.let {
+      isConnectingReader.set(false)
+      onConn(it)
+      return
+    }
+
     val config = ConnectionConfiguration.TapToPayConnectionConfiguration(
       locId,
       autoReconnectOnUnexpectedDisconnect = true,
@@ -572,6 +578,14 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
         onConn(connectedReader)
       }
       override fun onFailure(e: TerminalException) {
+        if (shouldTreatAsAlreadyConnected(e)) {
+          terminal.connectedReader?.let { connected ->
+            isConnectingReader.set(false)
+            sendDebugLog("ℹ️ Reader already connected — reusing existing connection")
+            onConn(connected)
+            return
+          }
+        }
         isConnectingReader.set(false)
         Log.e(TAG, "Connect failed: code=${e.errorCode}, msg=${e.errorMessage}")
         sendDebugLog("❌ Reader connect failed [${e.errorCode}]: ${e.errorMessage}")
@@ -907,6 +921,13 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
     var attemptCount = 0
 
     fun attemptConnect() {
+      Terminal.getInstance().connectedReader?.let {
+        isConnectingReader.set(false)
+        sendProgress(3, "Ready!")
+        result?.success(mapOf("status" to "READY"))
+        return
+      }
+
       attemptCount++
       val config = ConnectionConfiguration.TapToPayConnectionConfiguration(
         locationId,
@@ -922,6 +943,16 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
         }
 
         override fun onFailure(e: TerminalException) {
+          if (shouldTreatAsAlreadyConnected(e)) {
+            Terminal.getInstance().connectedReader?.let {
+              isConnectingReader.set(false)
+              sendProgress(3, "Ready!")
+              sendDebugLog("ℹ️ Reader already connected — prepare completed")
+              result?.success(mapOf("status" to "READY"))
+              return
+            }
+          }
+
           if (attemptCount < maxRetries) {
             Log.w(TAG, "Connection attempt $attemptCount failed: ${e.message}, retrying in ${currentDelay}ms")
             val retryRunnable = Runnable {
@@ -1064,6 +1095,17 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
    * Connect to a discovered reader in the eager init background pipeline.
    */
   private fun connectEagerReader(terminal: Terminal, reader: Reader, locationId: String) {
+    terminal.connectedReader?.let { connected ->
+      isConnectingReader.set(false)
+      Log.d(TAG, "EagerPrepare: Reader already connected ✅")
+      sendProgress(3, "Ready!")
+      sendDebugLog("✅ Reader pre-connected — payments will be instant")
+      mainHandler.post {
+        methodChannel?.invokeMethod("onReaderConnected", mapOf("source" to "eagerPrepare"))
+      }
+      return
+    }
+
     Log.d(TAG, "EagerPrepare: Connecting to reader...")
     sendProgress(2, "Downloading...")
 
@@ -1085,6 +1127,19 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
         }
       }
       override fun onFailure(e: TerminalException) {
+        if (shouldTreatAsAlreadyConnected(e)) {
+          terminal.connectedReader?.let { _ ->
+            isConnectingReader.set(false)
+            Log.d(TAG, "EagerPrepare: Reusing existing reader connection ✅")
+            sendProgress(3, "Ready!")
+            sendDebugLog("✅ Reader pre-connected — payments will be instant")
+            mainHandler.post {
+              methodChannel?.invokeMethod("onReaderConnected", mapOf("source" to "eagerPrepare"))
+            }
+            return
+          }
+        }
+
         isConnectingReader.set(false)
         Log.w(TAG, "EagerPrepare: Connect failed: code=${e.errorCode}, msg=${e.errorMessage}")
         sendDebugLog("⚠️ Eager connect failed [${e.errorCode}]: ${e.errorMessage}")
@@ -1598,5 +1653,16 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
       methodChannel?.invokeMethod("onDebugLog", mapOf("message" to message))
     }
   }
-}
 
+  /**
+   * Stripe may return "disconnect first reader" during connection races,
+   * even though a reader is already connected. Treat that as reusable success.
+   */
+  private fun shouldTreatAsAlreadyConnected(e: TerminalException): Boolean {
+    val code = e.errorCode?.toString()?.uppercase() ?: ""
+    val message = (e.errorMessage ?: e.message ?: "").uppercase()
+    return code.contains("ALREADY_CONNECTED") ||
+      message.contains("ALREADY CONNECTED") ||
+      message.contains("DISCONNECT FIRST READER")
+  }
+}

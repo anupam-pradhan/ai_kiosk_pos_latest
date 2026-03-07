@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'animated_splash.dart';
@@ -16,29 +15,7 @@ Future<void> main() async {
 
   try {
     await dotenv.load(fileName: '.env');
-  } catch (e) {
-    // If .env file doesn't exist, continue with defaults
-    if (kDebugMode) {
-      print('Warning: .env file not found, using defaults');
-    }
-  }
-
-  // Print configuration in debug mode
-  AppConfig.printConfig();
-
-  // Initialize Stripe Terminal (native code handles SDK init)
-  try {
-    // Stripe Terminal is initialized in native code (Android/KioskApplication.kt)
-    // eagerPrepare in KioskWebViewScreen handles reader discovery + connection
-    // from cached config — no separate prewarmup needed here.
-    if (kDebugMode) {
-      print('Stripe Terminal SDK 4.7.6 ready');
-    }
-  } catch (e) {
-    if (kDebugMode) {
-      print('Warning: Stripe initialization: $e');
-    }
-  }
+  } catch (_) {}
 
   runApp(const KioskApp());
 }
