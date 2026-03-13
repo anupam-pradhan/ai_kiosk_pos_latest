@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -149,9 +150,6 @@ class _PaymentSuccessOverlayState extends State<PaymentSuccessOverlay>
     await Future.delayed(const Duration(milliseconds: 400));
     if (!mounted) return;
     _contentController.forward();
-
-    await Future.delayed(const Duration(seconds: 3));
-    if (mounted) widget.onDone();
   }
 
   @override
@@ -171,8 +169,8 @@ class _PaymentSuccessOverlayState extends State<PaymentSuccessOverlay>
       color: Colors.transparent,
       child: Center(
         child: Container(
-          width: 300,
-          padding: const EdgeInsets.symmetric(vertical: 40, horizontal: 24),
+          width: 340,
+          padding: const EdgeInsets.fromLTRB(24, 40, 24, 24),
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(28),
@@ -315,12 +313,33 @@ class _PaymentSuccessOverlayState extends State<PaymentSuccessOverlay>
                         ],
                         const SizedBox(height: 16),
                         const Text(
-                          'Your order will be prepared shortly',
+                          'Payment complete. Please review the amount, then tap Done.',
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             color: Color(0xFF9CA3AF),
                             fontSize: 13,
                             fontWeight: FontWeight.w400,
+                          ),
+                        ),
+                        const SizedBox(height: 22),
+                        SizedBox(
+                          width: double.infinity,
+                          child: FilledButton(
+                            onPressed: widget.onDone,
+                            style: FilledButton.styleFrom(
+                              backgroundColor: darkGreen,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              textStyle: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.2,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(18),
+                              ),
+                            ),
+                            child: const Text('Done'),
                           ),
                         ),
                       ],
@@ -402,6 +421,7 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
     with TickerProviderStateMixin {
   late final AnimationController _enterController;
   late final AnimationController _countdownController;
+  late final AnimationController _ambientController;
   bool _dismissed = false;
 
   @override
@@ -415,6 +435,10 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
       vsync: this,
       duration: const Duration(seconds: 5),
     );
+    _ambientController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2400),
+    );
     _countdownController.addStatusListener((status) {
       if (status == AnimationStatus.completed && mounted) {
         _dismissOverlay();
@@ -422,6 +446,7 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
     });
     _enterController.forward();
     _countdownController.forward();
+    _ambientController.repeat(reverse: true);
   }
 
   void _dismissOverlay() {
@@ -437,141 +462,598 @@ class _TapToPayInstructionOverlayState extends State<TapToPayInstructionOverlay>
   void dispose() {
     _enterController.dispose();
     _countdownController.dispose();
+    _ambientController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     const ringGreen = Color(0xFF22C55E);
-    final screenWidth = MediaQuery.sizeOf(context).width;
-    final cardWidth = (screenWidth - 32).clamp(320.0, 380.0).toDouble();
-    final ringSize = (cardWidth * 0.70).clamp(220.0, 260.0).toDouble();
-    final innerCircleSize = (ringSize * 0.78).clamp(176.0, 204.0).toDouble();
+    const forestGreen = Color(0xFF166534);
+    const deepGreen = Color(0xFF14532D);
+    const mint = Color(0xFFF0FDF4);
 
     return Material(
       color: Colors.transparent,
       child: AnimatedBuilder(
-        animation: Listenable.merge([_enterController, _countdownController]),
+        animation: Listenable.merge([
+          _enterController,
+          _countdownController,
+          _ambientController,
+        ]),
         builder: (context, child) {
-          final t = Curves.easeOutCubic.transform(_enterController.value);
+          final t = Curves.easeOutBack.transform(_enterController.value);
           final countdown = 1.0 - _countdownController.value;
+          final pulse = Curves.easeInOutSine.transform(
+            _ambientController.value,
+          );
+          final secondsLeft = (5 - (_countdownController.value * 5))
+              .ceil()
+              .clamp(1, 5);
+          final iconFloat =
+              math.sin(_ambientController.value * math.pi * 2) * 5;
+
           return Transform.translate(
-            offset: Offset(0, (1 - t) * 24),
+            offset: Offset(0, (1 - t) * 28),
             child: Opacity(
               opacity: t,
               child: Transform.scale(
-                scale: 0.94 + (0.06 * t),
-                child: Center(
-                  child: Container(
-                    width: cardWidth,
-                    padding: const EdgeInsets.fromLTRB(20, 22, 20, 18),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(24),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.18),
-                          blurRadius: 26,
-                          offset: const Offset(0, 12),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SizedBox(
-                          width: ringSize,
-                          height: ringSize,
-                          child: Stack(
-                            alignment: Alignment.center,
-                            children: [
-                              SizedBox.expand(
-                                child: CircularProgressIndicator(
-                                  value: countdown,
-                                  strokeWidth: 10,
-                                  strokeCap: StrokeCap.round,
-                                  backgroundColor: ringGreen.withValues(
-                                    alpha: 0.16,
-                                  ),
-                                  valueColor:
-                                      const AlwaysStoppedAnimation<Color>(
-                                        ringGreen,
-                                      ),
-                                ),
-                              ),
-                              Container(
-                                width: innerCircleSize,
-                                height: innerCircleSize,
-                                padding: const EdgeInsets.all(18),
+                scale: 0.92 + (0.08 * t),
+                child: SafeArea(
+                  minimum: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final cardWidth = math
+                          .min(constraints.maxWidth, 432.0)
+                          .toDouble();
+                      final heightScale = (constraints.maxHeight / 820)
+                          .clamp(0.86, 1.0)
+                          .toDouble();
+                      final ringSize = math
+                          .min(
+                            math.min(cardWidth * 0.70, 292.0),
+                            constraints.maxHeight * 0.42,
+                          )
+                          .toDouble();
+                      final innerCircleSize = (ringSize * 0.72)
+                          .clamp(172.0, 214.0)
+                          .toDouble();
+                      final titleSize = 28.0 * heightScale;
+                      final targetTextSize = 20.0 * heightScale;
+                      final amountSize = 28.0 * heightScale;
+                      final buttonHeight = (56.0 * heightScale)
+                          .clamp(48.0, 56.0)
+                          .toDouble();
+                      final compactSpacing = 18.0 * heightScale;
+                      final bodySpacing = 22.0 * heightScale;
+
+                      return Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          Positioned(
+                            top: constraints.maxHeight * 0.08,
+                            right: -20,
+                            child: Transform.scale(
+                              scale: 0.96 + (pulse * 0.10),
+                              child: Container(
+                                width: 170,
+                                height: 170,
                                 decoration: BoxDecoration(
                                   shape: BoxShape.circle,
-                                  color: const Color(0xFFF0FDF4),
-                                  border: Border.all(
-                                    color: ringGreen.withValues(alpha: 0.28),
-                                  ),
-                                ),
-                                child: const Center(
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(
-                                        Icons.contactless_rounded,
-                                        size: 38,
-                                        color: Color(0xFF15803D),
-                                      ),
-                                      SizedBox(height: 8),
-                                      Text(
-                                        'Tap card right here on next page',
-                                        textAlign: TextAlign.center,
-                                        style: TextStyle(
-                                          color: Color(0xFF166534),
-                                          fontSize: 18,
-                                          fontWeight: FontWeight.w800,
-                                          height: 1.2,
-                                        ),
-                                      ),
+                                  gradient: RadialGradient(
+                                    colors: [
+                                      ringGreen.withValues(alpha: 0.20),
+                                      ringGreen.withValues(alpha: 0.02),
                                     ],
                                   ),
                                 ),
                               ),
-                            ],
+                            ),
                           ),
-                        ),
-                        if (widget.amountStr.isNotEmpty) ...[
-                          const SizedBox(height: 12),
-                          Text(
-                            widget.amountStr,
-                            style: const TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.w800,
-                              color: Color(0xFF111827),
+                          Positioned(
+                            bottom: constraints.maxHeight * 0.10,
+                            left: -34,
+                            child: Container(
+                              width: 190,
+                              height: 190,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                gradient: RadialGradient(
+                                  colors: [
+                                    const Color(
+                                      0xFFFDE68A,
+                                    ).withValues(alpha: 0.18),
+                                    const Color(
+                                      0xFFFDE68A,
+                                    ).withValues(alpha: 0.02),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                          SingleChildScrollView(
+                            physics: const ClampingScrollPhysics(),
+                            child: Center(
+                              child: Container(
+                                width: cardWidth,
+                                padding: EdgeInsets.fromLTRB(
+                                  22,
+                                  22 * heightScale,
+                                  22,
+                                  20 * heightScale,
+                                ),
+                                decoration: BoxDecoration(
+                                  gradient: const LinearGradient(
+                                    colors: [
+                                      Color(0xFFFFFFFF),
+                                      Color(0xFFF8FFF9),
+                                      Color(0xFFEFFBF3),
+                                    ],
+                                    begin: Alignment.topLeft,
+                                    end: Alignment.bottomRight,
+                                  ),
+                                  borderRadius: BorderRadius.circular(30),
+                                  border: Border.all(
+                                    color: ringGreen.withValues(alpha: 0.12),
+                                  ),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: ringGreen.withValues(alpha: 0.12),
+                                      blurRadius: 42,
+                                      spreadRadius: 2,
+                                      offset: const Offset(0, 20),
+                                    ),
+                                    BoxShadow(
+                                      color: Colors.black.withValues(
+                                        alpha: 0.10,
+                                      ),
+                                      blurRadius: 18,
+                                      offset: const Offset(0, 10),
+                                    ),
+                                  ],
+                                ),
+                                child: Stack(
+                                  children: [
+                                    Positioned(
+                                      top: -40,
+                                      right: -14,
+                                      child: Container(
+                                        width: 112,
+                                        height: 112,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          gradient: RadialGradient(
+                                            colors: [
+                                              ringGreen.withValues(alpha: 0.18),
+                                              ringGreen.withValues(alpha: 0.02),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    Positioned(
+                                      bottom: -54,
+                                      left: -26,
+                                      child: Container(
+                                        width: 132,
+                                        height: 132,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          gradient: RadialGradient(
+                                            colors: [
+                                              const Color(
+                                                0xFFFDE68A,
+                                              ).withValues(alpha: 0.14),
+                                              const Color(
+                                                0xFFFDE68A,
+                                              ).withValues(alpha: 0.02),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Container(
+                                          padding: EdgeInsets.symmetric(
+                                            horizontal: 14,
+                                            vertical: 8 * heightScale,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: deepGreen,
+                                            borderRadius: BorderRadius.circular(
+                                              999,
+                                            ),
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: deepGreen.withValues(
+                                                  alpha: 0.18,
+                                                ),
+                                                blurRadius: 14,
+                                                offset: const Offset(0, 8),
+                                              ),
+                                            ],
+                                          ),
+                                          child: const Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Icon(
+                                                Icons.contactless_rounded,
+                                                size: 16,
+                                                color: Colors.white,
+                                              ),
+                                              SizedBox(width: 8),
+                                              Text(
+                                                'Tap to Pay Ready',
+                                                style: TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 13,
+                                                  fontWeight: FontWeight.w700,
+                                                  letterSpacing: 0.2,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        SizedBox(height: compactSpacing),
+                                        Text(
+                                          'Tap on the next screen',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            fontSize: titleSize,
+                                            fontWeight: FontWeight.w900,
+                                            color: const Color(0xFF111827),
+                                            letterSpacing: -0.8,
+                                            height: 1.05,
+                                          ),
+                                        ),
+                                        SizedBox(height: 10 * heightScale),
+                                        Text(
+                                          'Keep your card or phone ready. The contactless target appears on the next screen.',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            color: const Color(0xFF4B5563),
+                                            fontSize: 14 * heightScale,
+                                            fontWeight: FontWeight.w500,
+                                            height: 1.45,
+                                          ),
+                                        ),
+                                        SizedBox(height: bodySpacing),
+                                        Container(
+                                          padding: EdgeInsets.symmetric(
+                                            horizontal: 12,
+                                            vertical: 10 * heightScale,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white.withValues(
+                                              alpha: 0.66,
+                                            ),
+                                            borderRadius: BorderRadius.circular(
+                                              28,
+                                            ),
+                                            border: Border.all(
+                                              color: ringGreen.withValues(
+                                                alpha: 0.08,
+                                              ),
+                                            ),
+                                          ),
+                                          child: SizedBox(
+                                            width: ringSize,
+                                            height: ringSize,
+                                            child: Stack(
+                                              alignment: Alignment.center,
+                                              children: [
+                                                Transform.scale(
+                                                  scale: 0.94 + (pulse * 0.16),
+                                                  child: Container(
+                                                    width: ringSize * 0.86,
+                                                    height: ringSize * 0.86,
+                                                    decoration: BoxDecoration(
+                                                      shape: BoxShape.circle,
+                                                      gradient: RadialGradient(
+                                                        colors: [
+                                                          ringGreen.withValues(
+                                                            alpha: 0.20,
+                                                          ),
+                                                          ringGreen.withValues(
+                                                            alpha: 0.03,
+                                                          ),
+                                                        ],
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                                Container(
+                                                  width: ringSize * 0.90,
+                                                  height: ringSize * 0.90,
+                                                  decoration: BoxDecoration(
+                                                    shape: BoxShape.circle,
+                                                    border: Border.all(
+                                                      color: ringGreen
+                                                          .withValues(
+                                                            alpha:
+                                                                0.14 +
+                                                                (pulse * 0.16),
+                                                          ),
+                                                      width: 2,
+                                                    ),
+                                                  ),
+                                                ),
+                                                SizedBox.expand(
+                                                  child: CircularProgressIndicator(
+                                                    value: countdown,
+                                                    strokeWidth: 12,
+                                                    strokeCap: StrokeCap.round,
+                                                    backgroundColor: ringGreen
+                                                        .withValues(
+                                                          alpha: 0.12,
+                                                        ),
+                                                    valueColor:
+                                                        const AlwaysStoppedAnimation<
+                                                          Color
+                                                        >(ringGreen),
+                                                  ),
+                                                ),
+                                                Container(
+                                                  width: innerCircleSize,
+                                                  height: innerCircleSize,
+                                                  padding: EdgeInsets.all(
+                                                    18 * heightScale,
+                                                  ),
+                                                  decoration: BoxDecoration(
+                                                    shape: BoxShape.circle,
+                                                    gradient:
+                                                        const LinearGradient(
+                                                          colors: [
+                                                            Color(0xFFFFFFFF),
+                                                            mint,
+                                                          ],
+                                                          begin:
+                                                              Alignment.topLeft,
+                                                          end: Alignment
+                                                              .bottomRight,
+                                                        ),
+                                                    border: Border.all(
+                                                      color: ringGreen
+                                                          .withValues(
+                                                            alpha: 0.24,
+                                                          ),
+                                                    ),
+                                                    boxShadow: [
+                                                      BoxShadow(
+                                                        color: ringGreen
+                                                            .withValues(
+                                                              alpha: 0.10,
+                                                            ),
+                                                        blurRadius: 24,
+                                                        spreadRadius: 2,
+                                                        offset: const Offset(
+                                                          0,
+                                                          10,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                  child: Column(
+                                                    mainAxisAlignment:
+                                                        MainAxisAlignment
+                                                            .center,
+                                                    children: [
+                                                      Container(
+                                                        padding:
+                                                            EdgeInsets.symmetric(
+                                                              horizontal: 12,
+                                                              vertical:
+                                                                  6 *
+                                                                  heightScale,
+                                                            ),
+                                                        decoration: BoxDecoration(
+                                                          color: ringGreen
+                                                              .withValues(
+                                                                alpha: 0.10,
+                                                              ),
+                                                          borderRadius:
+                                                              BorderRadius.circular(
+                                                                999,
+                                                              ),
+                                                        ),
+                                                        child: Text(
+                                                          widget.nfcHint,
+                                                          style: TextStyle(
+                                                            color: forestGreen,
+                                                            fontSize:
+                                                                12 *
+                                                                heightScale,
+                                                            fontWeight:
+                                                                FontWeight.w800,
+                                                            letterSpacing: 0.3,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                      SizedBox(
+                                                        height:
+                                                            12 * heightScale,
+                                                      ),
+                                                      Transform.translate(
+                                                        offset: Offset(
+                                                          0,
+                                                          iconFloat,
+                                                        ),
+                                                        child: Icon(
+                                                          Icons
+                                                              .contactless_rounded,
+                                                          size:
+                                                              62 * heightScale,
+                                                          color: forestGreen,
+                                                        ),
+                                                      ),
+                                                      SizedBox(
+                                                        height:
+                                                            12 * heightScale,
+                                                      ),
+                                                      Text(
+                                                        'Tap card right here\non next page',
+                                                        textAlign:
+                                                            TextAlign.center,
+                                                        style: TextStyle(
+                                                          color: deepGreen,
+                                                          fontSize:
+                                                              targetTextSize,
+                                                          fontWeight:
+                                                              FontWeight.w800,
+                                                          height: 1.2,
+                                                          letterSpacing: -0.3,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ),
+                                        SizedBox(height: bodySpacing),
+                                        if (widget.amountStr.isNotEmpty)
+                                          Container(
+                                            width: double.infinity,
+                                            padding: EdgeInsets.symmetric(
+                                              horizontal: 18,
+                                              vertical: 16 * heightScale,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: Colors.white.withValues(
+                                                alpha: 0.86,
+                                              ),
+                                              borderRadius:
+                                                  BorderRadius.circular(20),
+                                              border: Border.all(
+                                                color: const Color(
+                                                  0xFFF59E0B,
+                                                ).withValues(alpha: 0.22),
+                                              ),
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                Container(
+                                                  width: 42,
+                                                  height: 42,
+                                                  decoration: BoxDecoration(
+                                                    color: const Color(
+                                                      0xFFF59E0B,
+                                                    ).withValues(alpha: 0.12),
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          14,
+                                                        ),
+                                                  ),
+                                                  child: const Icon(
+                                                    Icons.receipt_long_rounded,
+                                                    color: Color(0xFFB45309),
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 14),
+                                                Expanded(
+                                                  child: Column(
+                                                    crossAxisAlignment:
+                                                        CrossAxisAlignment
+                                                            .start,
+                                                    children: [
+                                                      Text(
+                                                        'Amount due',
+                                                        style: TextStyle(
+                                                          color: const Color(
+                                                            0xFF6B7280,
+                                                          ),
+                                                          fontSize:
+                                                              12 * heightScale,
+                                                          fontWeight:
+                                                              FontWeight.w700,
+                                                        ),
+                                                      ),
+                                                      const SizedBox(height: 2),
+                                                      Text(
+                                                        widget.amountStr,
+                                                        style: TextStyle(
+                                                          fontSize: amountSize,
+                                                          fontWeight:
+                                                              FontWeight.w900,
+                                                          color: const Color(
+                                                            0xFF111827,
+                                                          ),
+                                                          letterSpacing: -0.7,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        SizedBox(height: 18 * heightScale),
+                                        ClipRRect(
+                                          borderRadius: BorderRadius.circular(
+                                            999,
+                                          ),
+                                          child: LinearProgressIndicator(
+                                            value: countdown,
+                                            minHeight: 8,
+                                            backgroundColor: ringGreen
+                                                .withValues(alpha: 0.10),
+                                            valueColor:
+                                                const AlwaysStoppedAnimation<
+                                                  Color
+                                                >(ringGreen),
+                                          ),
+                                        ),
+                                        SizedBox(height: 10 * heightScale),
+                                        Text(
+                                          'Closing automatically in ${secondsLeft}s',
+                                          style: TextStyle(
+                                            color: const Color(0xFF6B7280),
+                                            fontSize: 13 * heightScale,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        SizedBox(height: 18 * heightScale),
+                                        SizedBox(
+                                          width: double.infinity,
+                                          child: FilledButton(
+                                            onPressed: _dismissOverlay,
+                                            style: FilledButton.styleFrom(
+                                              backgroundColor: deepGreen,
+                                              foregroundColor: Colors.white,
+                                              minimumSize: Size.fromHeight(
+                                                buttonHeight,
+                                              ),
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(18),
+                                              ),
+                                              elevation: 0,
+                                            ),
+                                            child: Text(
+                                              'Continue',
+                                              style: TextStyle(
+                                                fontSize: 17 * heightScale,
+                                                fontWeight: FontWeight.w800,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ),
                           ),
                         ],
-                        const SizedBox(height: 16),
-                        SizedBox(
-                          width: double.infinity,
-                          child: FilledButton(
-                            onPressed: _dismissOverlay,
-                            style: FilledButton.styleFrom(
-                              backgroundColor: const Color(0xFF16A34A),
-                              foregroundColor: Colors.white,
-                              minimumSize: const Size.fromHeight(46),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                            ),
-                            child: const Text(
-                              'OK',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+                      );
+                    },
                   ),
                 ),
               ),

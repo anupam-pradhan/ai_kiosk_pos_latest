@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'animated_splash.dart';
 import 'config/app_config.dart';
@@ -17,11 +18,50 @@ Future<void> main() async {
     await dotenv.load(fileName: '.env');
   } catch (_) {}
 
+  await _applyKioskSystemUi();
   runApp(const KioskApp());
 }
 
-class KioskApp extends StatelessWidget {
+Future<void> _applyKioskSystemUi() async {
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    systemNavigationBarColor: Colors.transparent,
+    systemNavigationBarDividerColor: Colors.transparent,
+  ));
+}
+
+class KioskApp extends StatefulWidget {
   const KioskApp({super.key});
+
+  @override
+  State<KioskApp> createState() => _KioskAppState();
+}
+
+class _KioskAppState extends State<KioskApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _applyKioskSystemUi();
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _applyKioskSystemUi();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {

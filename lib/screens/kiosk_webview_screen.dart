@@ -46,6 +46,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   int _retryCount = 0;
   StreamSubscription<bool>? _readerDisconnectSub;
   StreamSubscription<bool>? _readerConnectSub;
+  String _lastPrewarmKey = '';
 
   /// Tracks whether we've had a successful payment → reader is connected.
   /// When true, skip the prepare dialog entirely for instant NFC screen.
@@ -63,6 +64,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     // Resets _readerConnected so next payment shows prepare dialog
     _readerDisconnectSub = _debugService.readerDisconnectedStream.listen((_) {
       _readerConnected = false;
+      _lastPrewarmKey = '';
       _debugService.log(
         '⚠️ Reader disconnected — next payment will re-prepare',
       );
@@ -127,6 +129,41 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     } catch (e) {
       debugPrint('⚠️ Failed to cache terminal config: $e');
     }
+  }
+
+  Future<void> _cacheAndPrewarmTapToPayConfig(
+    String terminalBaseUrl,
+    String locationId,
+  ) async {
+    final normalizedUrl = terminalBaseUrl.trim().replaceFirst(RegExp(r'/$'), '');
+    final normalizedLocationId = locationId.trim();
+    if (normalizedUrl.isEmpty || normalizedLocationId.isEmpty) return;
+
+    await _cacheTerminalConfig(normalizedUrl, normalizedLocationId);
+
+    final prewarmKey = '$normalizedUrl|$normalizedLocationId';
+    if (_readerConnected || _lastPrewarmKey == prewarmKey) {
+      return;
+    }
+
+    _lastPrewarmKey = prewarmKey;
+    _debugService.log('🚀 Background Tap to Pay prepare dispatched');
+
+    unawaited(
+      DebugLogService.channel.invokeMethod('eagerPrepare', {
+        'terminalBaseUrl': normalizedUrl,
+        'locationId': normalizedLocationId,
+        'isSimulated': AppConfig.isTapToPaySimulated,
+      }).catchError((Object error) {
+        if (_lastPrewarmKey == prewarmKey) {
+          _lastPrewarmKey = '';
+        }
+        _debugService.log(
+          '⚠️ Background Tap to Pay prepare failed: $error',
+        );
+        return null;
+      }),
+    );
   }
 
   @override
@@ -1085,6 +1122,34 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                         };
                       }
 
+                      if (type == "PREPARE_TAP_TO_PAY") {
+                        final terminalBaseUrl = payload["terminalBaseUrl"];
+                        final locationId = payload["locationId"];
+
+                        if (terminalBaseUrl is! String ||
+                            locationId is! String ||
+                            terminalBaseUrl.trim().isEmpty ||
+                            locationId.trim().isEmpty) {
+                          return {
+                            "ok": false,
+                            "reason": "MISSING_FIELDS",
+                            "message":
+                                "terminalBaseUrl and locationId are required.",
+                          };
+                        }
+
+                        await _cacheAndPrewarmTapToPayConfig(
+                          terminalBaseUrl,
+                          locationId,
+                        );
+
+                        return {
+                          "ok": true,
+                          "type": "PREPARE_TAP_TO_PAY",
+                          "status": "STARTED",
+                        };
+                      }
+
                       // Tap-to-Pay entrypoint
                       if (type == "START_TAP_TO_PAY") {
                         if (_isPaymentProcessing) {
@@ -1096,6 +1161,45 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           await _notifyWebStatus(busyPayload);
                           return busyPayload;
                         }
+
+                        final amount = payload["amount"];
+                        final currency = payload["currency"];
+                        final orderId = payload["orderId"];
+                        final paymentIntentId = payload["paymentIntentId"];
+                        final clientSecret = payload["clientSecret"];
+                        final terminalBaseUrl = payload["terminalBaseUrl"];
+                        final locationId = payload["locationId"];
+
+                        final missing = <String, bool>{
+                          "amount": amount == null,
+                          "currency": currency == null,
+                          "orderId": orderId == null,
+                          "paymentIntentId": paymentIntentId == null,
+                          "clientSecret": clientSecret == null,
+                          "terminalBaseUrl": terminalBaseUrl == null,
+                          "locationId": locationId == null,
+                        };
+
+                        final hasMissing = missing.values.any((v) => v == true);
+                        if (hasMissing) {
+                          await _showPaymentErrorDialog(
+                            title: "Payment Error",
+                            message:
+                                "Payment request is missing required fields.",
+                          );
+                          return {
+                            "ok": false,
+                            "reason": "MISSING_FIELDS",
+                            "missing": missing,
+                            "hint":
+                                "terminalBaseUrl must be LAN IP like http://192.168.1.161:4242 (not localhost).",
+                          };
+                        }
+
+                        await _cacheAndPrewarmTapToPayConfig(
+                          terminalBaseUrl as String,
+                          locationId as String,
+                        );
 
                         final nfcStatus = await _getNfcStatus();
                         final nfcSupported = nfcStatus["supported"] == true;
@@ -1148,47 +1252,6 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           await _notifyWebStatus(errorPayload);
                           return errorPayload;
                         }
-
-                        final amount = payload["amount"];
-                        final currency = payload["currency"];
-                        final orderId = payload["orderId"];
-                        final paymentIntentId = payload["paymentIntentId"];
-                        final clientSecret = payload["clientSecret"];
-                        final terminalBaseUrl = payload["terminalBaseUrl"];
-                        final locationId = payload["locationId"];
-
-                        // Validate required fields
-                        final missing = <String, bool>{
-                          "amount": amount == null,
-                          "currency": currency == null,
-                          "orderId": orderId == null,
-                          "paymentIntentId": paymentIntentId == null,
-                          "clientSecret": clientSecret == null,
-                          "terminalBaseUrl": terminalBaseUrl == null,
-                          "locationId": locationId == null,
-                        };
-
-                        final hasMissing = missing.values.any((v) => v == true);
-                        if (hasMissing) {
-                          await _showPaymentErrorDialog(
-                            title: "Payment Error",
-                            message:
-                                "Payment request is missing required fields.",
-                          );
-                          return {
-                            "ok": false,
-                            "reason": "MISSING_FIELDS",
-                            "missing": missing,
-                            "hint":
-                                "terminalBaseUrl must be LAN IP like http://192.168.1.161:4242 (not localhost).",
-                          };
-                        }
-
-                        // Cache terminal config for eager init on next app launch
-                        await _cacheTerminalConfig(
-                          terminalBaseUrl as String,
-                          locationId as String,
-                        );
 
                         // Optional prepare dialog for first payment.
                         // By default we skip this popup and start payment
@@ -1250,12 +1313,21 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           final resMap = nativeRes is Map
                               ? Map<String, dynamic>.from(nativeRes)
                               : <String, dynamic>{};
-                          await _showPaymentSuccessDialog(
-                            last4: resMap['last4'] as String?,
-                            cardBrand: resMap['cardBrand'] as String?,
-                            amountCents: resMap['amount'] as int?,
-                            currency: resMap['currency'] as String?,
-                          );
+                          if (mounted) {
+                            unawaited(
+                              _showPaymentSuccessDialog(
+                                last4: resMap['last4'] as String?,
+                                cardBrand: resMap['cardBrand'] as String?,
+                                amountCents: resMap['amount'] as int?,
+                                currency: resMap['currency'] as String?,
+                              ).catchError((Object error) {
+                                _debugService.log(
+                                  '⚠️ Failed to show payment success dialog: $error',
+                                );
+                                return null;
+                              }),
+                            );
+                          }
 
                           return {"ok": true, "data": nativeRes};
                         } on TimeoutException {

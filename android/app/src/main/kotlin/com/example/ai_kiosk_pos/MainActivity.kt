@@ -53,6 +53,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.io.IOException
+import java.net.SocketTimeoutException
 import java.security.KeyStore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -81,6 +83,7 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
     private const val CONNECT_MAX_RETRIES = 2
     private const val CONNECT_INITIAL_DELAY_MS = 500L
     private const val PREWARMUP_DURATION_MS = 2_000L       // 2 seconds
+    private const val TOKEN_FETCH_RETRY_DELAY_MS = 800L
   }
 
   private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -91,9 +94,9 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
   // ═══════════════════════════════════════════════════════════
 
   private val httpClient = OkHttpClient.Builder()
-    .connectTimeout(10, TimeUnit.SECONDS)
-    .readTimeout(15, TimeUnit.SECONDS)
-    .writeTimeout(15, TimeUnit.SECONDS)
+    .connectTimeout(15, TimeUnit.SECONDS)
+    .readTimeout(20, TimeUnit.SECONDS)
+    .writeTimeout(20, TimeUnit.SECONDS)
     .build()
 
   // ═══════════════════════════════════════════════════════════
@@ -111,14 +114,13 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
       }
       activityScope.launch(Dispatchers.IO) {
         try {
-          val body = "{}".toRequestBody("application/json".toMediaType())
-          val req = Request.Builder().url("$url/terminal/connection_token").post(body).build()
-          val secret = httpClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) throw Exception("HTTP ${resp.code}")
-            JSONObject(resp.body?.string() ?: "").getString("secret")
-          }
+          sendDebugLog("🔑 Fetching connection token...")
+          val secret = fetchConnectionTokenFromBackend(url)
+          sendDebugLog("✅ Connection token fetched")
           withContext(Dispatchers.Main) { callback.onSuccess(secret) }
         } catch (e: Exception) {
+          Log.e(TAG, "Connection token fetch failed: ${e.message}", e)
+          sendDebugLog("❌ Connection token fetch failed: ${e.message}")
           withContext(Dispatchers.Main) {
             callback.onFailure(ConnectionTokenException(e.message ?: "Token fetch failed", e))
           }
@@ -403,52 +405,10 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
       }
 
       sendDebugLog("🔍 Discovering reader...")
-
-      // PARALLEL PATH: Retrieve PI + connect reader simultaneously.
-      // retrievePaymentIntent only needs Terminal initialized (not a connected reader).
-      // This overlaps the ~1-2s retrieve with the ~3-5s discover+connect.
-      var retrievedIntent: PaymentIntent? = null
-      var retrieveFailed: TerminalException? = null
-      var readerReady = false
-      var connectFailed: Pair<String, String>? = null
-      val resolved = AtomicBoolean(false)
-
-      fun tryFinish() {
-        // Both legs must be done before we proceed
-        val intentDone = retrievedIntent != null || retrieveFailed != null
-        val connDone = readerReady || connectFailed != null
-        if (!intentDone || !connDone) return
-        // Only one caller proceeds (safety against double-delivery)
-        if (!resolved.compareAndSet(false, true)) return
-
-        // Check errors (connection errors take priority)
-        connectFailed?.let { (c, m) -> return finishWithError(c, m, null) }
-        retrieveFailed?.let { e ->
-          return finishWithError("RETRIEVE_FAILED", e.errorMessage ?: "Retrieve failed", e.toString())
-        }
-
-        collectAndConfirm(retrievedIntent!!, orderId)
-      }
-
-      // Leg 1: Retrieve PI (only needs Terminal, not a reader)
-      terminal.retrievePaymentIntent(secret, object : PaymentIntentCallback {
-        override fun onSuccess(intent: PaymentIntent) {
-          retrievedIntent = intent
-          mainHandler.post { tryFinish() }
-        }
-        override fun onFailure(e: TerminalException) {
-          retrieveFailed = e
-          mainHandler.post { tryFinish() }
-        }
-      })
-
-      // Leg 2: Discover + connect reader
       ensureReaderConnected(locId, isSim, { _ ->
-        readerReady = true
-        mainHandler.post { tryFinish() }
+        retrieveAndProcess(secret, orderId)
       }, { c, m ->
-        connectFailed = c to m
-        mainHandler.post { tryFinish() }
+        finishWithError(c, m, null)
       })
     }
   }
@@ -1642,6 +1602,45 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
 
   private fun normalizeBaseUrl(u: String) = u.trimEnd('/')
 
+  private fun fetchConnectionTokenFromBackend(baseUrl: String): String {
+    var lastError: Exception? = null
+
+    for (attempt in 0 until 2) {
+      try {
+        val startedAt = System.currentTimeMillis()
+        val body = "{}".toRequestBody("application/json".toMediaType())
+        val req = Request.Builder()
+          .url("$baseUrl/terminal/connection_token")
+          .post(body)
+          .build()
+
+        return httpClient.newCall(req).execute().use { resp ->
+          val rawBody = resp.body?.string().orEmpty()
+          if (!resp.isSuccessful) {
+            val detail = rawBody.take(120).ifBlank { "empty body" }
+            throw IOException("Token endpoint HTTP ${resp.code}: $detail")
+          }
+
+          val secret = JSONObject(rawBody).optString("secret")
+          if (secret.isBlank()) {
+            throw IOException("Token endpoint returned no secret")
+          }
+
+          Log.d(TAG, "Connection token fetched in ${System.currentTimeMillis() - startedAt}ms")
+          secret
+        }
+      } catch (e: Exception) {
+        lastError = e
+        val canRetry = attempt == 0 && e.isRetryableTokenFetchError()
+        if (!canRetry) break
+        Log.w(TAG, "Retrying connection token fetch after transient failure: ${e.message}")
+        Thread.sleep(TOKEN_FETCH_RETRY_DELAY_MS)
+      }
+    }
+
+    throw lastError ?: IOException("Token fetch failed")
+  }
+
   private fun sendProgress(step: Int, message: String) {
     mainHandler.post {
       methodChannel?.invokeMethod("onTtpProgress", mapOf("step" to step, "message" to message))
@@ -1664,5 +1663,10 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
     return code.contains("ALREADY_CONNECTED") ||
       message.contains("ALREADY CONNECTED") ||
       message.contains("DISCONNECT FIRST READER")
+  }
+
+  private fun Exception.isRetryableTokenFetchError(): Boolean {
+    return this is SocketTimeoutException ||
+      (this is IOException && this !is ConnectionTokenException)
   }
 }
