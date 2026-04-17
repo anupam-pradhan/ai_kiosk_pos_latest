@@ -1218,6 +1218,33 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                         }
                       }
 
+                      if (type == "PRINT_RAW") {
+                        try {
+                          final base64Data = payload["data"] as String?;
+                          final copies = payload["copies"] is int
+                              ? payload["copies"] as int
+                              : 1;
+                          if (base64Data == null ||
+                              base64Data.trim().isEmpty) {
+                            return {
+                              "ok": false,
+                              "error": "Missing 'data' field",
+                            };
+                          }
+                          final ok = await _printerService.printRaw(
+                            base64Data,
+                            copies: copies,
+                          );
+                          return {"ok": ok, "type": "PRINT_RESULT"};
+                        } catch (e) {
+                          return {
+                            "ok": false,
+                            "type": "PRINT_RESULT",
+                            "error": e.toString(),
+                          };
+                        }
+                      }
+
                       if (type == "SCAN_PRINTERS") {
                         try {
                           final printers = await _printerService.scanPrinters();
@@ -1649,11 +1676,10 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                         }
                       }
 
-                      await _showPaymentErrorDialog(
-                        title: "Unsupported Request",
-                        message:
-                            "Unknown command from web app: ${type ?? 'null'}",
-                        icon: Icons.help_outline,
+                      // Unknown command — log silently, don't show dialog
+                      // (older web app versions may send commands this APK doesn't support yet)
+                      debugPrint(
+                        '⚠️ [kioskBridge] Unknown command: ${type ?? 'null'}',
                       );
                       return {
                         "ok": false,
