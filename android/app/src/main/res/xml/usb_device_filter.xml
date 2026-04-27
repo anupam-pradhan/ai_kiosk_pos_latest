@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Match USB Printer class (class 7) — covers most standard thermal printers -->
+    <usb-device class="7" />
+    <!-- Vendor-specific devices (class 0xFF) that use bulk endpoints —
+         common for POS thermal printers that don't declare printer class -->
+    <usb-device class="255" />
+</resources>

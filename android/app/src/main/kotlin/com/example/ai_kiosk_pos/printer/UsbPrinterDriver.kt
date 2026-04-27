@@ -114,15 +114,24 @@ class UsbPrinterDriver(private val context: Context) {
     try {
       disconnect()
 
+      Log.d(TAG, "Looking for USB device: $deviceName")
+      Log.d(TAG, "Available USB devices: ${usbManager.deviceList.keys}")
+
       val device = usbManager.deviceList[deviceName]
-        ?: throw IOException("USB device not found: $deviceName")
+        ?: throw IOException("USB device not found: $deviceName (available: ${usbManager.deviceList.keys})")
+
+      Log.d(TAG, "Found device: ${device.productName} VID=${device.vendorId} PID=${device.productId} class=${device.deviceClass} ifaceCount=${device.interfaceCount}")
 
       // Check/request permission
       if (!usbManager.hasPermission(device)) {
+        Log.d(TAG, "No USB permission — requesting...")
         val granted = requestPermission(device)
         if (!granted) {
           throw IOException("USB permission denied for $deviceName")
         }
+        Log.d(TAG, "USB permission granted ✅")
+      } else {
+        Log.d(TAG, "USB permission already granted ✅")
       }
 
       // Find printer interface and OUT bulk endpoint
@@ -131,12 +140,15 @@ class UsbPrinterDriver(private val context: Context) {
 
       for (i in 0 until device.interfaceCount) {
         val iface = device.getInterface(i)
+        Log.d(TAG, "Interface $i: class=${iface.interfaceClass} subclass=${iface.interfaceSubclass} endpoints=${iface.endpointCount}")
         for (j in 0 until iface.endpointCount) {
           val ep = iface.getEndpoint(j)
+          Log.d(TAG, "  Endpoint $j: type=${ep.type} dir=${ep.direction} maxPacket=${ep.maxPacketSize}")
           if (ep.type == UsbConstants.USB_ENDPOINT_XFER_BULK &&
               ep.direction == UsbConstants.USB_DIR_OUT) {
             printerInterface = iface
             outEndpoint = ep
+            Log.d(TAG, "  → Selected as OUT bulk endpoint ✅")
             break
           }
         }
@@ -173,22 +185,27 @@ class UsbPrinterDriver(private val context: Context) {
 
   /**
    * Request USB permission from the user.
+   * Uses RECEIVER_EXPORTED because the USB permission broadcast
+   * originates from the system (UsbManager), which is external.
    */
   private suspend fun requestPermission(device: UsbDevice): Boolean =
     suspendCancellableCoroutine { cont ->
       val receiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
           if (ACTION_USB_PERMISSION == intent.action) {
-            context.unregisterReceiver(this)
+            try { context.unregisterReceiver(this) } catch (_: Exception) {}
             val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+            Log.d(TAG, "USB permission result: granted=$granted for ${device.deviceName}")
             if (cont.isActive) cont.resume(granted)
           }
         }
       }
 
       val filter = IntentFilter(ACTION_USB_PERMISSION)
+      // The USB permission response is broadcast by the system (external),
+      // so the receiver MUST be EXPORTED to receive it.
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
       } else {
         context.registerReceiver(receiver, filter)
       }
@@ -200,6 +217,7 @@ class UsbPrinterDriver(private val context: Context) {
       }
 
       val permIntent = PendingIntent.getBroadcast(context, 0, Intent(ACTION_USB_PERMISSION), flags)
+      Log.d(TAG, "Requesting USB permission for ${device.deviceName}...")
       usbManager.requestPermission(device, permIntent)
 
       cont.invokeOnCancellation {
