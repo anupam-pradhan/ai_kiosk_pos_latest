@@ -77,7 +77,8 @@
                 android:name="android.nfc.action.TECH_DISCOVERED"
                 android:resource="@xml/nfc_tech_filter" />
 
-            <!-- USB printer auto-detection when device is plugged in -->
+            <!-- USB printer auto-permission: when a USB printer is plugged in,
+                 Android will auto-grant USB Host permission to this app -->
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
             </intent-filter>
