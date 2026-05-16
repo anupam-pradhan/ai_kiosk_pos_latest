@@ -3,6 +3,7 @@ package com.example.ai_kiosk_pos
 import com.example.ai_kiosk_pos.printer.PrinterManager
 
 import android.Manifest
+import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -202,6 +203,9 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
     // Initialize PrinterManager
     printerManager = PrinterManager(this)
     printerManager.debugLogSender = { msg -> sendDebugLog(msg) }
+    printerManager.statusSender = { status ->
+      methodChannel?.invokeMethod("onPrinterStatusChanged", status)
+    }
 
     channel.setMethodCallHandler { call, result ->
       val args = call.arguments as? Map<*, *> ?: emptyMap<Any, Any>()
@@ -212,9 +216,11 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
         "requestMicrophonePermission" -> requestMicrophonePermission(result)
         "getNfcStatus"    -> getNfcStatus(result)
         "getLocationStatus" -> getLocationStatus(result)
+        "getBluetoothStatus" -> getBluetoothStatus(result)
         "getDeveloperOptionsStatus" -> getDeveloperOptionsStatus(result)
         "openNfcSettings" -> { openNfcSettings(); result.success(true) }
         "openLocationSettings" -> { openLocationSettings(); result.success(true) }
+        "openBluetoothSettings" -> { openBluetoothSettings(); result.success(true) }
         "openDeveloperSettings" -> { openDeveloperSettings(); result.success(true) }
         "prewarmupNfc"    -> prewarmupNfc(args, result)
         "eagerPrepare"    -> eagerPrepare(args, result)
@@ -273,6 +279,13 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
     }
   }
 
+  override fun onResume() {
+    super.onResume()
+    if (::printerManager.isInitialized) {
+      printerManager.handleAppResume()
+    }
+  }
+
   override fun onDestroy() {
     super.onDestroy()
     // Cancel ALL tracked runnables to prevent callbacks on dead activity
@@ -281,6 +294,9 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
     safeCancel(discoveryCancelable)
     safeCancel(currentPaymentCancelable)
     // Shutdown coroutine scope and HTTP client
+    if (::printerManager.isInitialized) {
+      printerManager.shutdown()
+    }
     activityScope.cancel()
     httpClient.dispatcher.executorService.shutdown()
   }
@@ -1583,12 +1599,32 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
     res.success(mapOf("hasPermission" to hasPermission, "enabled" to enabled))
   }
 
+  private fun getBluetoothStatus(res: MethodChannel.Result) {
+    val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+    val supported = btManager?.adapter != null
+    val enabled = btManager?.adapter?.isEnabled == true
+    val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+    } else {
+      true
+    }
+    res.success(mapOf(
+      "supported" to supported,
+      "enabled" to enabled,
+      "hasPermission" to hasPermission
+    ))
+  }
+
   private fun openNfcSettings() {
     startActivity(Intent(Settings.ACTION_NFC_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
   }
 
   private fun openLocationSettings() {
     startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+  }
+
+  private fun openBluetoothSettings() {
+    startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
   }
 
   private fun getDeveloperOptionsStatus(res: MethodChannel.Result) {

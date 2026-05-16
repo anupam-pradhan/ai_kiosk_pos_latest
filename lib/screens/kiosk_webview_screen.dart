@@ -47,6 +47,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   bool _nfcResumeCheckInFlight = false;
   Timer? _retryTimer;
   int _retryCount = 0;
+  StreamSubscription<Map<String, dynamic>>? _printerStatusSub;
   StreamSubscription<bool>? _readerDisconnectSub;
   StreamSubscription<bool>? _readerConnectSub;
   String _lastPrewarmKey = '';
@@ -79,6 +80,12 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
       _readerConnected = true;
       _debugService.log('✅ Reader pre-connected — payments will be instant');
     });
+
+    if (AppConfig.isPrinterEnabled) {
+      _printerStatusSub = _debugService.printerStatusStream.listen((status) {
+        unawaited(_emitPrinterStatusToWeb(status));
+      });
+    }
 
     // Eagerly prepare Tap to Pay in background for faster first payment.
     // Pre-initializes Terminal SDK + discovers + connects reader.
@@ -179,6 +186,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _retryTimer?.cancel();
+    _printerStatusSub?.cancel();
     _readerDisconnectSub?.cancel();
     _readerConnectSub?.cancel();
     super.dispose();
@@ -189,6 +197,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     if (state == AppLifecycleState.resumed) {
       _checkNfcOnResume();
       _checkDeveloperOptionsOnResume();
+      if (AppConfig.isPrinterEnabled) {
+        unawaited(_emitCurrentPrinterStatusToWeb());
+      }
     }
   }
 
@@ -212,6 +223,68 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
       source:
           "window.onNativePaymentStatus && window.onNativePaymentStatus($jsonPayload);",
     );
+  }
+
+  Future<void> _emitPrinterStatusToWeb(Map<String, dynamic> status) async {
+    final controller = _webViewController;
+    if (controller == null) return;
+    final normalized = _normalizePrinterStatus(status);
+    final jsonPayload = jsonEncode(normalized);
+    await controller.evaluateJavascript(
+      source:
+          "window.onPrinterStatusChanged && window.onPrinterStatusChanged($jsonPayload);",
+    );
+  }
+
+  Future<void> _emitCurrentPrinterStatusToWeb() async {
+    try {
+      final status = await _printerService.getPrinterStatus();
+      await _emitPrinterStatusToWeb(status);
+    } catch (_) {
+      await _emitPrinterStatusToWeb(_normalizePrinterStatus({}));
+    }
+  }
+
+  Map<String, dynamic> _normalizePrinterStatus(Map<String, dynamic> status) {
+    return {
+      "connected": status["connected"] == true,
+      "name": status["name"]?.toString() ?? "",
+      "address": status["address"]?.toString() ?? "",
+      "type": status["type"]?.toString() ?? "",
+      "autoPrintEnabled": status["autoPrintEnabled"] is bool
+          ? status["autoPrintEnabled"] as bool
+          : true,
+      "printCopies": status["printCopies"] is int
+          ? status["printCopies"] as int
+          : int.tryParse(status["printCopies"]?.toString() ?? "") ?? 1,
+      "lastPrinterName": status["lastPrinterName"]?.toString() ?? "",
+      "lastPrinterAddress": status["lastPrinterAddress"]?.toString() ?? "",
+      "lastPrinterType": status["lastPrinterType"]?.toString() ?? "",
+    };
+  }
+
+  bool _isPrinterCommand(dynamic type) {
+    return const {
+      "PRINT_RECEIPT",
+      "PRINT_KOT",
+      "PRINT_RAW",
+      "SCAN_PRINTERS",
+      "CONNECT_PRINTER",
+      "DISCONNECT_PRINTER",
+      "GET_PRINTER_STATUS",
+      "TEST_PRINT",
+      "UPDATE_PRINTER_SETTINGS",
+      "GET_BLUETOOTH_STATUS",
+      "OPEN_BLUETOOTH_SETTINGS",
+    }.contains(type);
+  }
+
+  Map<String, dynamic> _printerDisabledResponse() {
+    return {
+      "ok": false,
+      "error": "Printer bridge is disabled for this app mode",
+      "status": _normalizePrinterStatus({}),
+    };
   }
 
   Map<String, dynamic> _buildFallbackPayload({
@@ -1086,6 +1159,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                   });
                   _checkNfcOnStartup();
                   _injectWebViewFixes(controller);
+                  if (AppConfig.isPrinterEnabled) {
+                    unawaited(_emitCurrentPrinterStatusToWeb());
+                  }
                 },
                 onReceivedServerTrustAuthRequest:
                     (controller, challenge) async {
@@ -1181,6 +1257,10 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                       }
 
                       // ── Printer Operations ──
+                      if (_isPrinterCommand(type) &&
+                          !AppConfig.isPrinterEnabled) {
+                        return _printerDisabledResponse();
+                      }
 
                       if (type == "PRINT_RECEIPT") {
                         try {
@@ -1189,16 +1269,31 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           final copies = payload["copies"] is int
                               ? payload["copies"] as int
                               : null;
-                          final ok = await _printerService.printReceipt(
+                          final result = await _printerService.printReceipt(
                             orderData,
                             copies: copies,
                           );
-                          return {"ok": ok, "type": "PRINT_RESULT"};
+                          final status = _safeMap(result["status"]);
+                          if (status.isNotEmpty) {
+                            unawaited(_emitPrinterStatusToWeb(status));
+                          }
+                          return {
+                            "ok": result["ok"] == true,
+                            "type": "PRINT_RESULT",
+                            "code": result["code"],
+                            "errorCode": result["errorCode"],
+                            "error": result["error"],
+                            "status": _normalizePrinterStatus(status),
+                          };
                         } catch (e) {
+                          final status = await _printerService
+                              .getPrinterStatus();
+                          unawaited(_emitPrinterStatusToWeb(status));
                           return {
                             "ok": false,
                             "type": "PRINT_RESULT",
                             "error": e.toString(),
+                            "status": _normalizePrinterStatus(status),
                           };
                         }
                       }
@@ -1207,13 +1302,30 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                         try {
                           final orderData = Map<String, dynamic>.from(payload);
                           orderData.remove("type");
-                          final ok = await _printerService.printKot(orderData);
-                          return {"ok": ok, "type": "PRINT_RESULT"};
+                          final result = await _printerService.printKot(
+                            orderData,
+                          );
+                          final status = _safeMap(result["status"]);
+                          if (status.isNotEmpty) {
+                            unawaited(_emitPrinterStatusToWeb(status));
+                          }
+                          return {
+                            "ok": result["ok"] == true,
+                            "type": "PRINT_RESULT",
+                            "code": result["code"],
+                            "errorCode": result["errorCode"],
+                            "error": result["error"],
+                            "status": _normalizePrinterStatus(status),
+                          };
                         } catch (e) {
+                          final status = await _printerService
+                              .getPrinterStatus();
+                          unawaited(_emitPrinterStatusToWeb(status));
                           return {
                             "ok": false,
                             "type": "PRINT_RESULT",
                             "error": e.toString(),
+                            "status": _normalizePrinterStatus(status),
                           };
                         }
                       }
@@ -1224,40 +1336,72 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           final copies = payload["copies"] is int
                               ? payload["copies"] as int
                               : 1;
-                          if (base64Data == null ||
-                              base64Data.trim().isEmpty) {
+                          if (base64Data == null || base64Data.trim().isEmpty) {
                             return {
                               "ok": false,
+                              "code": "INVALID_DATA",
+                              "errorCode": "INVALID_DATA",
                               "error": "Missing 'data' field",
+                              "status": await _printerService
+                                  .getPrinterStatus(),
                             };
                           }
-                          final ok = await _printerService.printRaw(
+                          final result = await _printerService.printRaw(
                             base64Data,
                             copies: copies,
                           );
-                          return {"ok": ok, "type": "PRINT_RESULT"};
+                          final status = _safeMap(result["status"]);
+                          if (status.isNotEmpty) {
+                            unawaited(_emitPrinterStatusToWeb(status));
+                          }
+                          return {
+                            "ok": result["ok"] == true,
+                            "type": "PRINT_RESULT",
+                            "code": result["code"],
+                            "errorCode": result["errorCode"],
+                            "error": result["error"],
+                            "status": _normalizePrinterStatus(status),
+                          };
                         } catch (e) {
+                          final status = await _printerService
+                              .getPrinterStatus();
+                          unawaited(_emitPrinterStatusToWeb(status));
                           return {
                             "ok": false,
                             "type": "PRINT_RESULT",
                             "error": e.toString(),
+                            "status": _normalizePrinterStatus(status),
                           };
                         }
                       }
 
                       if (type == "SCAN_PRINTERS") {
                         try {
-                          final printers = await _printerService.scanPrinters();
+                          final result = await _printerService
+                              .scanPrintersDetailed();
                           return {
-                            "ok": true,
+                            "ok": result["ok"] != false,
                             "type": "SCAN_RESULT",
-                            "printers": printers,
+                            "printers": result["printers"] ?? [],
+                            "bluetoothPermissionGranted":
+                                result["bluetoothPermissionGranted"] == true,
+                            "bluetoothEnabled":
+                                result["bluetoothEnabled"] == true,
+                            "bluetoothAvailable":
+                                result["bluetoothAvailable"] != false,
+                            "error": result["error"],
+                            "status": _normalizePrinterStatus(
+                              _safeMap(result["status"]),
+                            ),
                           };
                         } catch (e) {
+                          final status = await _printerService
+                              .getPrinterStatus();
                           return {
                             "ok": false,
                             "type": "SCAN_RESULT",
                             "error": e.toString(),
+                            "status": _normalizePrinterStatus(status),
                           };
                         }
                       }
@@ -1267,9 +1411,14 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                         final printerType =
                             payload["printerType"] as String? ?? "bluetooth";
                         if (address == null || address.trim().isEmpty) {
+                          final status = await _printerService
+                              .getPrinterStatus();
                           return {
                             "ok": false,
+                            "code": "INVALID_IP",
+                            "errorCode": "INVALID_IP",
                             "error": "Printer address is required",
+                            "status": _normalizePrinterStatus(status),
                           };
                         }
                         try {
@@ -1277,15 +1426,34 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                             address,
                             printerType,
                           );
+                          final status = _safeMap(result["status"]);
+                          if (status.isNotEmpty) {
+                            unawaited(_emitPrinterStatusToWeb(status));
+                          }
                           return result;
                         } catch (e) {
-                          return {"ok": false, "error": e.toString()};
+                          final status = await _printerService
+                              .getPrinterStatus();
+                          unawaited(_emitPrinterStatusToWeb(status));
+                          return {
+                            "ok": false,
+                            "error": e.toString(),
+                            "status": _normalizePrinterStatus(status),
+                          };
                         }
                       }
 
                       if (type == "DISCONNECT_PRINTER") {
-                        await _printerService.disconnectPrinter();
-                        return {"ok": true};
+                        final result = await _printerService
+                            .disconnectPrinter();
+                        final status = _safeMap(result["status"]);
+                        if (status.isNotEmpty) {
+                          unawaited(_emitPrinterStatusToWeb(status));
+                        }
+                        return {
+                          "ok": result["ok"] != false,
+                          "status": _normalizePrinterStatus(status),
+                        };
                       }
 
                       if (type == "GET_PRINTER_STATUS") {
@@ -1296,12 +1464,15 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                             "ok": true,
                             "type": "PRINTER_STATUS",
                           };
-                          result.addAll(status);
+                          final fullStatus = _normalizePrinterStatus(status);
+                          result.addAll(fullStatus);
+                          result["status"] = fullStatus;
                           return result;
                         } catch (e) {
+                          final status = _normalizePrinterStatus({});
                           return {
                             "ok": false,
-                            "connected": false,
+                            ...status,
                             "error": e.toString(),
                           };
                         }
@@ -1309,20 +1480,90 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
 
                       if (type == "TEST_PRINT") {
                         try {
-                          final ok = await _printerService.testPrint();
-                          return {"ok": ok, "type": "PRINT_RESULT"};
+                          final result = await _printerService.testPrint();
+                          final status = _safeMap(result["status"]);
+                          if (status.isNotEmpty) {
+                            unawaited(_emitPrinterStatusToWeb(status));
+                          }
+                          return {
+                            "ok": result["ok"] == true,
+                            "type": "PRINT_RESULT",
+                            "code": result["code"],
+                            "errorCode": result["errorCode"],
+                            "error": result["error"],
+                            "status": _normalizePrinterStatus(status),
+                          };
                         } catch (e) {
+                          final status = await _printerService
+                              .getPrinterStatus();
+                          unawaited(_emitPrinterStatusToWeb(status));
                           return {
                             "ok": false,
                             "type": "PRINT_RESULT",
                             "error": e.toString(),
+                            "status": _normalizePrinterStatus(status),
+                          };
+                        }
+                      }
+
+                      if (type == "GET_BLUETOOTH_STATUS") {
+                        try {
+                          final result = await DebugLogService.channel
+                              .invokeMethod<dynamic>("getBluetoothStatus");
+                          if (result is Map) {
+                            final status = await _printerService
+                                .getPrinterStatus();
+                            return {
+                              "ok": true,
+                              ...Map<String, dynamic>.from(result),
+                              "status": _normalizePrinterStatus(status),
+                            };
+                          }
+                          final status = await _printerService
+                              .getPrinterStatus();
+                          return {
+                            "ok": false,
+                            "supported": false,
+                            "enabled": false,
+                            "hasPermission": false,
+                            "status": _normalizePrinterStatus(status),
+                          };
+                        } catch (e) {
+                          final status = await _printerService
+                              .getPrinterStatus();
+                          return {
+                            "ok": false,
+                            "error": e.toString(),
+                            "status": _normalizePrinterStatus(status),
+                          };
+                        }
+                      }
+
+                      if (type == "OPEN_BLUETOOTH_SETTINGS") {
+                        try {
+                          await DebugLogService.channel.invokeMethod<void>(
+                            "openBluetoothSettings",
+                          );
+                          final status = await _printerService
+                              .getPrinterStatus();
+                          return {
+                            "ok": true,
+                            "status": _normalizePrinterStatus(status),
+                          };
+                        } catch (e) {
+                          final status = await _printerService
+                              .getPrinterStatus();
+                          return {
+                            "ok": false,
+                            "error": e.toString(),
+                            "status": _normalizePrinterStatus(status),
                           };
                         }
                       }
 
                       if (type == "UPDATE_PRINTER_SETTINGS") {
                         try {
-                          await _printerService.updateSettings(
+                          final result = await _printerService.updateSettings(
                             autoPrintEnabled:
                                 payload["autoPrintEnabled"] as bool?,
                             printCopies: payload["printCopies"] is int
@@ -1335,9 +1576,26 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                             restaurantPhone:
                                 payload["restaurantPhone"] as String?,
                           );
-                          return {"ok": true};
+                          final status = _safeMap(result["status"]);
+                          if (status.isNotEmpty) {
+                            unawaited(_emitPrinterStatusToWeb(status));
+                          }
+                          return {
+                            "ok": result["ok"] != false,
+                            "code": result["code"],
+                            "errorCode": result["errorCode"],
+                            "error": result["error"],
+                            "status": _normalizePrinterStatus(status),
+                          };
                         } catch (e) {
-                          return {"ok": false, "error": e.toString()};
+                          final status = await _printerService
+                              .getPrinterStatus();
+                          unawaited(_emitPrinterStatusToWeb(status));
+                          return {
+                            "ok": false,
+                            "error": e.toString(),
+                            "status": _normalizePrinterStatus(status),
+                          };
                         }
                       }
 

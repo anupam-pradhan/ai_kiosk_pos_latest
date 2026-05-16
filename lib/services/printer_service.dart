@@ -23,21 +23,25 @@ class PrinterService {
   /// Returns a list of printer info maps with keys:
   ///   name, address, type ('bluetooth'|'usb'), isPrinter, isConnected
   Future<List<Map<String, dynamic>>> scanPrinters() async {
+    final result = await scanPrintersDetailed();
+    final printers = result['printers'];
+    if (printers is List) {
+      return printers.map((p) => Map<String, dynamic>.from(p as Map)).toList();
+    }
+    return [];
+  }
+
+  Future<Map<String, dynamic>> scanPrintersDetailed() async {
     try {
       _debugService.log('🔍 Scanning for printers...');
       final result = await _channel.invokeMethod<dynamic>('scanPrinters');
       if (result is Map) {
-        final printers = result['printers'];
-        if (printers is List) {
-          return printers
-              .map((p) => Map<String, dynamic>.from(p as Map))
-              .toList();
-        }
+        return Map<String, dynamic>.from(result);
       }
-      return [];
+      return {'ok': false, 'printers': []};
     } on PlatformException catch (e) {
       _debugService.log('❌ Scan failed: ${e.message}');
-      return [];
+      return {'ok': false, 'error': e.message, 'printers': []};
     }
   }
 
@@ -59,34 +63,46 @@ class PrinterService {
       if (result is Map) {
         return Map<String, dynamic>.from(result);
       }
-      return {'ok': false};
+      return {'ok': false, 'status': await getPrinterStatus()};
     } on PlatformException catch (e) {
       _debugService.log('❌ Connect failed: ${e.message}');
-      return {'ok': false, 'error': e.message};
+      return {
+        'ok': false,
+        'error': e.message,
+        'status': await getPrinterStatus(),
+      };
     }
   }
 
   /// Disconnect from the current printer.
-  Future<void> disconnectPrinter() async {
+  Future<Map<String, dynamic>> disconnectPrinter() async {
     try {
-      await _channel.invokeMethod<dynamic>('disconnectPrinter');
+      final result = await _channel.invokeMethod<dynamic>('disconnectPrinter');
       _debugService.log('🔌 Printer disconnected');
+      if (result is Map) {
+        return Map<String, dynamic>.from(result);
+      }
+      return {'ok': true, 'status': await getPrinterStatus()};
     } on PlatformException catch (e) {
       _debugService.log('⚠️ Disconnect error: ${e.message}');
+      return {
+        'ok': false,
+        'error': e.message,
+        'status': await getPrinterStatus(),
+      };
     }
   }
 
   /// Get current printer connection status.
   Future<Map<String, dynamic>> getPrinterStatus() async {
     try {
-      final result =
-          await _channel.invokeMethod<dynamic>('getPrinterStatus');
+      final result = await _channel.invokeMethod<dynamic>('getPrinterStatus');
       if (result is Map) {
         return Map<String, dynamic>.from(result);
       }
-      return {'connected': false};
+      return _emptyStatus();
     } on PlatformException {
-      return {'connected': false};
+      return _emptyStatus();
     }
   }
 
@@ -103,46 +119,59 @@ class PrinterService {
   ///   restaurantName, restaurantAddress, restaurantPhone
   ///
   /// [copies] defaults to the configured print copies setting.
-  Future<bool> printReceipt(Map<String, dynamic> orderData,
-      {int? copies}) async {
+  Future<Map<String, dynamic>> printReceipt(
+    Map<String, dynamic> orderData, {
+    int? copies,
+  }) async {
     try {
       _debugService.log('🖨️ Printing receipt...');
       final args = Map<String, dynamic>.from(orderData);
       if (copies != null) {
         args['copies'] = copies;
       }
-      final result =
-          await _channel.invokeMethod<dynamic>('printReceipt', args);
+      final result = await _channel.invokeMethod<dynamic>('printReceipt', args);
       final ok = result is Map && result['ok'] == true;
       if (ok) {
         _debugService.log('✅ Receipt printed');
       }
-      return ok;
+      if (result is Map) return Map<String, dynamic>.from(result);
+      return {'ok': ok, 'status': await getPrinterStatus()};
     } on PlatformException catch (e) {
       _debugService.log('❌ Print receipt failed: ${e.message}');
-      return false;
+      return {
+        'ok': false,
+        'error': e.message,
+        'status': await getPrinterStatus(),
+      };
     }
   }
 
   /// Print a Kitchen Order Ticket (KOT).
-  Future<bool> printKot(Map<String, dynamic> orderData) async {
+  Future<Map<String, dynamic>> printKot(Map<String, dynamic> orderData) async {
     try {
       _debugService.log('🖨️ Printing KOT...');
-      final result =
-          await _channel.invokeMethod<dynamic>('printKot', orderData);
+      final result = await _channel.invokeMethod<dynamic>(
+        'printKot',
+        orderData,
+      );
       final ok = result is Map && result['ok'] == true;
       if (ok) {
         _debugService.log('✅ KOT printed');
       }
-      return ok;
+      if (result is Map) return Map<String, dynamic>.from(result);
+      return {'ok': ok, 'status': await getPrinterStatus()};
     } on PlatformException catch (e) {
       _debugService.log('❌ Print KOT failed: ${e.message}');
-      return false;
+      return {
+        'ok': false,
+        'error': e.message,
+        'status': await getPrinterStatus(),
+      };
     }
   }
 
   /// Print a test page.
-  Future<bool> testPrint() async {
+  Future<Map<String, dynamic>> testPrint() async {
     try {
       _debugService.log('🖨️ Printing test page...');
       final result = await _channel.invokeMethod<dynamic>('testPrint');
@@ -150,16 +179,24 @@ class PrinterService {
       if (ok) {
         _debugService.log('✅ Test page printed');
       }
-      return ok;
+      if (result is Map) return Map<String, dynamic>.from(result);
+      return {'ok': ok, 'status': await getPrinterStatus()};
     } on PlatformException catch (e) {
       _debugService.log('❌ Test print failed: ${e.message}');
-      return false;
+      return {
+        'ok': false,
+        'error': e.message,
+        'status': await getPrinterStatus(),
+      };
     }
   }
 
   /// Print raw ESC/POS bytes (base64-encoded).
   /// Used when the web app controls receipt formatting via PRINT_RAW.
-  Future<bool> printRaw(String base64Data, {int copies = 1}) async {
+  Future<Map<String, dynamic>> printRaw(
+    String base64Data, {
+    int copies = 1,
+  }) async {
     try {
       _debugService.log('🖨️ Printing raw data...');
       final result = await _channel.invokeMethod<dynamic>('printRaw', {
@@ -170,10 +207,17 @@ class PrinterService {
       if (ok) {
         _debugService.log('✅ Raw print complete');
       }
-      return ok;
+      if (result is Map) {
+        return Map<String, dynamic>.from(result);
+      }
+      return {'ok': ok, 'status': await getPrinterStatus()};
     } on PlatformException catch (e) {
       _debugService.log('❌ Raw print failed: ${e.message}');
-      return false;
+      return {
+        'ok': false,
+        'error': e.message,
+        'status': await getPrinterStatus(),
+      };
     }
   }
 
@@ -182,7 +226,7 @@ class PrinterService {
   // ═════════════════════════════════════════════════════════
 
   /// Update printer settings.
-  Future<void> updateSettings({
+  Future<Map<String, dynamic>> updateSettings({
     bool? autoPrintEnabled,
     int? printCopies,
     String? restaurantName,
@@ -200,10 +244,36 @@ class PrinterService {
         args['restaurantAddress'] = restaurantAddress;
       }
       if (restaurantPhone != null) args['restaurantPhone'] = restaurantPhone;
-      await _channel.invokeMethod<dynamic>('updatePrinterSettings', args);
+      final result = await _channel.invokeMethod<dynamic>(
+        'updatePrinterSettings',
+        args,
+      );
       _debugService.log('⚙️ Printer settings updated');
+      if (result is Map) {
+        return Map<String, dynamic>.from(result);
+      }
+      return {'ok': true, 'status': await getPrinterStatus()};
     } on PlatformException catch (e) {
       _debugService.log('⚠️ Settings update failed: ${e.message}');
+      return {
+        'ok': false,
+        'error': e.message,
+        'status': await getPrinterStatus(),
+      };
     }
+  }
+
+  Map<String, dynamic> _emptyStatus() {
+    return {
+      'connected': false,
+      'name': '',
+      'address': '',
+      'type': '',
+      'autoPrintEnabled': true,
+      'printCopies': 1,
+      'lastPrinterName': '',
+      'lastPrinterAddress': '',
+      'lastPrinterType': '',
+    };
   }
 }

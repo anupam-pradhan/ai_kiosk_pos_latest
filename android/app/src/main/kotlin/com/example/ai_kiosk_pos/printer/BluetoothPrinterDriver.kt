@@ -1,12 +1,16 @@
 package com.example.ai_kiosk_pos.printer
 
 import android.annotation.SuppressLint
+import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -40,11 +44,29 @@ class BluetoothPrinterDriver(private val context: Context) {
   val isConnected: Boolean
     get() = socket?.isConnected == true
 
+  val isConnectionHealthy: Boolean
+    get() = socket?.isConnected == true && outputStream != null
+
   val connectedDeviceName: String?
     get() = connectedDevice?.name
 
   val connectedDeviceAddress: String?
     get() = connectedDevice?.address
+
+  val hasPermission: Boolean
+    get() = hasBluetoothPermission()
+
+  val isBluetoothEnabled: Boolean
+    get() {
+      val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+      return btManager?.adapter?.isEnabled == true
+    }
+
+  val isBluetoothAvailable: Boolean
+    get() {
+      val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+      return btManager?.adapter != null
+    }
 
   // ═══════════════════════════════════════════════════════════
   // Scanning
@@ -57,6 +79,11 @@ class BluetoothPrinterDriver(private val context: Context) {
    */
   @SuppressLint("MissingPermission")
   fun getPairedDevices(): List<PrinterInfo> {
+    if (!hasBluetoothPermission()) {
+      Log.w(TAG, "Bluetooth permission not granted")
+      return emptyList()
+    }
+
     val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
     val adapter = btManager?.adapter
 
@@ -80,7 +107,8 @@ class BluetoothPrinterDriver(private val context: Context) {
           isConnected = device.address == connectedDeviceAddress && isConnected
         )
       }
-      .sortedByDescending { it.isPrinter } // Printers first
+      .filter { it.isPrinter }
+      .sortedBy { it.name.lowercase() }
   }
 
   /**
@@ -99,7 +127,8 @@ class BluetoothPrinterDriver(private val context: Context) {
       "printer", "print", "pos", "thermal", "receipt", "escpos",
       "star ", "epson", "bixolon", "xprinter", "munbyn", "goojprt",
       "mtp-", "spp-", "bt-", "gprinter", "rongta", "hprt", "sewoo",
-      "zjiang", "milestone", "iposprinter", "hiloti", "nyear"
+      "zjiang", "milestone", "iposprinter", "hiloti", "nyear",
+      "sunmi", "imin", "sprt", "pt-", "rp-", "xp-"
     )
     return printerKeywords.any { name.contains(it) }
   }
@@ -115,6 +144,10 @@ class BluetoothPrinterDriver(private val context: Context) {
   @SuppressLint("MissingPermission")
   suspend fun connect(address: String): Boolean = withContext(Dispatchers.IO) {
     try {
+      if (!hasBluetoothPermission()) {
+        throw IOException("Bluetooth permission not granted")
+      }
+
       // Disconnect existing connection first
       disconnect()
 
@@ -229,6 +262,17 @@ class BluetoothPrinterDriver(private val context: Context) {
       // Connection likely broken
       disconnect()
       return@withContext false
+    }
+  }
+
+  private fun hasBluetoothPermission(): Boolean {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.BLUETOOTH_CONNECT
+      ) == PackageManager.PERMISSION_GRANTED
+    } else {
+      true
     }
   }
 }

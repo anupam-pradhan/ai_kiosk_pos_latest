@@ -46,6 +46,15 @@ class UsbPrinterDriver(private val context: Context) {
   val isConnected: Boolean
     get() = connection != null && endpoint != null
 
+  val isConnectionHealthy: Boolean
+    get() {
+      val address = connectedDevice?.deviceName
+      return connection != null &&
+        endpoint != null &&
+        address != null &&
+        usbManager.deviceList.containsKey(address)
+    }
+
   val connectedDeviceName: String?
     get() = connectedDevice?.productName ?: connectedDevice?.deviceName
 
