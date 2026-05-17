@@ -280,6 +280,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
       "TEST_PRINT",
       "UPDATE_PRINTER_SETTINGS",
       "GET_BLUETOOTH_STATUS",
+      "REQUEST_BLUETOOTH_PERMISSION",
       "OPEN_BLUETOOTH_SETTINGS",
       "OPEN_APP_SETTINGS",
       "OPEN_USB_SETTINGS",
@@ -1693,6 +1694,48 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                             "error": e.toString(),
                             "status": _normalizePrinterStatus(status),
                           };
+                        }
+                      }
+
+                      if (type == "REQUEST_BLUETOOTH_PERMISSION") {
+                        try {
+                          final result = await _printerService
+                              .requestBluetoothPermissions();
+                          final status = _safeMap(result["status"]);
+                          if (status.isNotEmpty) {
+                            unawaited(_emitPrinterStatusToWeb(status));
+                          }
+                          return {
+                            "ok": result["ok"] == true,
+                            if (result["ok"] != true)
+                              "code":
+                                  result["code"] ??
+                                  "BLUETOOTH_PERMISSION_DENIED",
+                            if (result["ok"] != true)
+                              "errorCode":
+                                  result["errorCode"] ??
+                                  result["code"] ??
+                                  "BLUETOOTH_PERMISSION_DENIED",
+                            if (result["ok"] != true)
+                              "message":
+                                  result["message"] ??
+                                  result["error"] ??
+                                  "Bluetooth permission was denied",
+                            if (result["ok"] != true)
+                              "error":
+                                  result["error"] ??
+                                  result["message"] ??
+                                  "Bluetooth permission was denied",
+                            "status": _normalizePrinterStatus(status),
+                          };
+                        } catch (e) {
+                          final status = await _printerService
+                              .getPrinterStatus();
+                          return _printerFailureResponse(
+                            code: "BLUETOOTH_PERMISSION_DENIED",
+                            message: e.toString(),
+                            status: status,
+                          );
                         }
                       }
 

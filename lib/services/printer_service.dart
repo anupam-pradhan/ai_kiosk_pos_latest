@@ -278,6 +278,32 @@ class PrinterService {
     }
   }
 
+  Future<Map<String, dynamic>> requestBluetoothPermissions() async {
+    try {
+      final result = await _channel.invokeMethod<dynamic>(
+        'requestBluetoothPermissions',
+      );
+      final granted = result is Map && result['granted'] == true;
+      final status = await getPrinterStatus();
+      if (granted) {
+        return {'ok': true, 'status': status};
+      }
+      return {
+        'ok': false,
+        'code': 'BLUETOOTH_PERMISSION_DENIED',
+        'errorCode': 'BLUETOOTH_PERMISSION_DENIED',
+        'message': 'Bluetooth permission was denied',
+        'error': 'Bluetooth permission was denied',
+        'status': status,
+      };
+    } on PlatformException catch (e) {
+      return _failure(
+        'BLUETOOTH_PERMISSION_DENIED',
+        e.message ?? 'Bluetooth permission request failed',
+      );
+    }
+  }
+
   Future<Map<String, dynamic>> _failure(
     String code,
     String message, {

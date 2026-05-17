@@ -180,6 +180,10 @@ class PrinterManager(private val context: Context) {
         val usbDevices = usbDriver.getUsbPrinters()
         printers.addAll(usbDevices.map { it.toMap() })
 
+        // Network printers reachable on the standard ESC/POS TCP port.
+        val networkDevices = wifiDriver.scanNetworkPrinters()
+        printers.addAll(networkDevices.map { it.toMap() })
+
         if (usbDriver.hasAnyUsbPrinter && !usbDriver.allPrinterPermissionsGranted) {
           val status = currentStatusMap()
           emitIfStatusChanged(statusBefore, status)
@@ -198,7 +202,7 @@ class PrinterManager(private val context: Context) {
           return@launch
         }
 
-        sendLog("📋 Found ${printers.size} devices (${btDevices.size} BT, ${usbDevices.size} USB)")
+        sendLog("📋 Found ${printers.size} devices (${btDevices.size} BT, ${usbDevices.size} USB, ${networkDevices.size} network)")
         val status = currentStatusMap()
         emitIfStatusChanged(statusBefore, status)
         result.success(mapOf(

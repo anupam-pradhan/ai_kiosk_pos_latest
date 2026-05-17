@@ -3,10 +3,16 @@ package com.example.ai_kiosk_pos.printer
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.io.OutputStream
+import java.net.Inet4Address
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
 
 /**
@@ -37,6 +43,45 @@ class WifiPrinterDriver {
 
   val connectedDeviceAddress: String?
     get() = _connectedAddress
+
+  /**
+   * Best-effort LAN discovery for ESC/POS network printers on port 9100.
+   * Keeps timeout short so the printer popup is not blocked for long.
+   */
+  suspend fun scanNetworkPrinters(): List<PrinterInfo> = withContext(Dispatchers.IO) {
+    val localAddress = getLocalIpv4Address() ?: return@withContext emptyList()
+    val parts = localAddress.hostAddress?.split(".") ?: return@withContext emptyList()
+    if (parts.size != 4) return@withContext emptyList()
+
+    val prefix = "${parts[0]}.${parts[1]}.${parts[2]}"
+    val self = parts[3].toIntOrNull()
+
+    withTimeoutOrNull(2500) {
+      coroutineScope {
+        (1..254)
+          .filter { it != self }
+          .map { hostSuffix ->
+            async(Dispatchers.IO) {
+              val host = "$prefix.$hostSuffix"
+              if (canReachPrinterPort(host, DEFAULT_PORT)) {
+                PrinterInfo(
+                  name = "Network Printer ($host)",
+                  address = "$host:$DEFAULT_PORT",
+                  type = "ethernet",
+                  isPrinter = true,
+                  isConnected = "$host:$DEFAULT_PORT" == connectedDeviceAddress && isConnected
+                )
+              } else {
+                null
+              }
+            }
+          }
+          .awaitAll()
+          .filterNotNull()
+          .sortedBy { it.address }
+      }
+    } ?: emptyList()
+  }
 
   /**
    * Connect to a WiFi printer by IP address.
@@ -82,6 +127,29 @@ class WifiPrinterDriver {
     _connectedAddress = null
     _connectedName = null
     Log.d(TAG, "WiFi printer disconnected")
+  }
+
+  private fun canReachPrinterPort(host: String, port: Int): Boolean {
+    return try {
+      Socket().use { sock ->
+        sock.connect(InetSocketAddress(host, port), 180)
+        true
+      }
+    } catch (_: Exception) {
+      false
+    }
+  }
+
+  private fun getLocalIpv4Address(): Inet4Address? {
+    return try {
+      NetworkInterface.getNetworkInterfaces().toList()
+        .filter { it.isUp && !it.isLoopback }
+        .flatMap { it.inetAddresses.toList() }
+        .filterIsInstance<Inet4Address>()
+        .firstOrNull { !it.isLoopbackAddress && it.isSiteLocalAddress }
+    } catch (_: Exception) {
+      null
+    }
   }
 
   /**

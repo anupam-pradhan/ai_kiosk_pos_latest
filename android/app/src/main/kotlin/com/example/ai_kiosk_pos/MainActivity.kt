@@ -181,6 +181,7 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
   private var pendingPermissionGranted: (() -> Unit)? = null
   private var pendingPermissionDenied: (() -> Unit)? = null
   private var pendingMicrophoneResult: MethodChannel.Result? = null
+  private var pendingBluetoothPermissionResult: MethodChannel.Result? = null
   private var eagerPrepareConfig: Triple<String, String, Boolean>? = null
 
   private val locationPermissions = arrayOf(
@@ -190,6 +191,7 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
   private val locationPermissionRequestCode = 1001
   private val microphonePermissionRequestCode = 1002
   private val eagerPermissionRequestCode = 1003
+  private val bluetoothPermissionRequestCode = 1004
 
   // ═══════════════════════════════════════════════════════════
   // LIFECYCLE
@@ -218,6 +220,7 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
         "getNfcStatus"    -> getNfcStatus(result)
         "getLocationStatus" -> getLocationStatus(result)
         "getBluetoothStatus" -> getBluetoothStatus(result)
+        "requestBluetoothPermissions" -> requestBluetoothPermissions(result)
         "getDeveloperOptionsStatus" -> getDeveloperOptionsStatus(result)
         "openNfcSettings" -> { openNfcSettings(); result.success(true) }
         "openLocationSettings" -> { openLocationSettings(); result.success(true) }
@@ -1571,6 +1574,14 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
           printerManager.handleAppResume()
         }
       }
+      bluetoothPermissionRequestCode -> {
+        val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+        pendingBluetoothPermissionResult?.success(mapOf("granted" to granted))
+        pendingBluetoothPermissionResult = null
+        if (::printerManager.isInitialized) {
+          printerManager.handleAppResume()
+        }
+      }
       eagerPermissionRequestCode -> {
         val allGranted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
         Log.d(TAG, "Eager permissions result: allGranted=$allGranted")
@@ -1632,6 +1643,33 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
     ))
   }
 
+  private fun requestBluetoothPermissions(res: MethodChannel.Result) {
+    val needed = mutableListOf<String>()
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+        needed.add(Manifest.permission.BLUETOOTH_CONNECT)
+      }
+      if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+        needed.add(Manifest.permission.BLUETOOTH_SCAN)
+      }
+    } else {
+      locationPermissions.forEach { perm ->
+        if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
+          needed.add(perm)
+        }
+      }
+    }
+
+    if (needed.isEmpty()) {
+      res.success(mapOf("granted" to true))
+      return
+    }
+
+    pendingBluetoothPermissionResult?.success(mapOf("granted" to false))
+    pendingBluetoothPermissionResult = res
+    ActivityCompat.requestPermissions(this, needed.toTypedArray(), bluetoothPermissionRequestCode)
+  }
+
   private fun openNfcSettings() {
     startActivity(Intent(Settings.ACTION_NFC_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
   }
@@ -1653,7 +1691,7 @@ class MainActivity : FlutterActivity(), TerminalListener, TapToPayReaderListener
   }
 
   private fun openUsbSettings() {
-    startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    openAppSettings()
   }
 
   private fun getDeveloperOptionsStatus(res: MethodChannel.Result) {
