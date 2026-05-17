@@ -1424,10 +1424,8 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                                 .getPrinterStatus();
                             return {
                               "ok": false,
-                              "code": "PRINTER_DISCONNECTED",
                               "errorCode": "PRINTER_DISCONNECTED",
                               "message": "Missing 'data' field",
-                              "error": "Missing 'data' field",
                               "status": _normalizePrinterStatus(status),
                             };
                           }
@@ -1439,38 +1437,34 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           if (status.isNotEmpty) {
                             unawaited(_emitPrinterStatusToWeb(status));
                           }
+                          final normalizedStatus = _normalizePrinterStatus(
+                            status,
+                          );
+                          if (result["ok"] == true) {
+                            return {"ok": true, "status": normalizedStatus};
+                          }
                           return {
-                            "ok": result["ok"] == true,
-                            "type": "PRINT_RESULT",
-                            if (result["ok"] != true)
-                              "code": result["code"] ?? "PRINTER_DISCONNECTED",
-                            if (result["ok"] != true)
-                              "errorCode":
-                                  result["errorCode"] ??
-                                  result["code"] ??
-                                  "PRINTER_DISCONNECTED",
-                            if (result["ok"] != true)
-                              "message":
-                                  result["message"] ??
-                                  result["error"] ??
-                                  "Raw print failed",
-                            if (result["ok"] != true)
-                              "error":
-                                  result["error"] ??
-                                  result["message"] ??
-                                  "Raw print failed",
-                            "status": _normalizePrinterStatus(status),
+                            "ok": false,
+                            "errorCode":
+                                result["errorCode"] ??
+                                result["code"] ??
+                                "PRINTER_DISCONNECTED",
+                            "message":
+                                result["message"] ??
+                                result["error"] ??
+                                "Raw print failed",
+                            "status": normalizedStatus,
                           };
                         } catch (e) {
                           final status = await _printerService
                               .getPrinterStatus();
                           unawaited(_emitPrinterStatusToWeb(status));
-                          return _printerFailureResponse(
-                            code: "PRINTER_DISCONNECTED",
-                            message: e.toString(),
-                            status: status,
-                            type: "PRINT_RESULT",
-                          );
+                          return {
+                            "ok": false,
+                            "errorCode": "PRINTER_DISCONNECTED",
+                            "message": e.toString(),
+                            "status": _normalizePrinterStatus(status),
+                          };
                         }
                       }
 

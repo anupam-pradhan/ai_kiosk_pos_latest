@@ -70,6 +70,7 @@ class PrinterManager(private val context: Context) {
   private var usbDetachReceiver: BroadcastReceiver? = null
   private var bluetoothReceiver: BroadcastReceiver? = null
   private var manualDisconnectRequested = false
+  private var lastPrintFailureCode: String? = null
 
   init {
     registerUsbDetachReceiver()
@@ -593,24 +594,35 @@ class PrinterManager(private val context: Context) {
    * Tries Bluetooth first, then USB (auto-reconnects if needed).
    */
   internal suspend fun printBytes(data: ByteArray): Boolean {
+    lastPrintFailureCode = null
+
     // Try Bluetooth first
     if (btDriver.isConnected) {
       val ok = btDriver.print(data)
-      if (!ok) emitDisconnectedAfterPrintFailure("Bluetooth print failed")
+      if (!ok) {
+        lastPrintFailureCode = "PRINTER_DISCONNECTED"
+        emitDisconnectedAfterPrintFailure("Bluetooth print failed")
+      }
       return ok
     }
 
     // Try USB
     if (usbDriver.isConnected) {
       val ok = usbDriver.print(data)
-      if (!ok) emitDisconnectedAfterPrintFailure("USB print failed")
+      if (!ok) {
+        lastPrintFailureCode = "PRINTER_DISCONNECTED"
+        emitDisconnectedAfterPrintFailure("USB print failed")
+      }
       return ok
     }
 
     // Try WiFi
     if (wifiDriver.isConnected) {
       val ok = wifiDriver.print(data)
-      if (!ok) emitDisconnectedAfterPrintFailure("WiFi print failed")
+      if (!ok) {
+        lastPrintFailureCode = "PRINTER_DISCONNECTED"
+        emitDisconnectedAfterPrintFailure("WiFi print failed")
+      }
       return ok
     }
 
@@ -620,6 +632,7 @@ class PrinterManager(private val context: Context) {
 
     if (manualDisconnectRequested) {
       sendLog("ℹ️ Printer auto-reconnect skipped after manual disconnect")
+      lastPrintFailureCode = "PRINTER_DISCONNECTED"
       emitStatus()
       return false
     }
@@ -643,14 +656,26 @@ class PrinterManager(private val context: Context) {
           "ethernet" -> wifiDriver.print(data)
           else -> false
         }
-        if (!ok) emitDisconnectedAfterPrintFailure("Print failed after reconnect")
+        if (!ok) {
+          lastPrintFailureCode = "PRINTER_DISCONNECTED"
+          emitDisconnectedAfterPrintFailure("Print failed after reconnect")
+        }
         return ok
       } else {
         sendLog("⚠️ Auto-reconnect failed")
+        lastPrintFailureCode = when (normalizePrinterType(lastType)) {
+          "wifi", "ethernet" -> "NETWORK_UNREACHABLE"
+          "usb" -> if (usbDriver.allPrinterPermissionsGranted) "PRINTER_DISCONNECTED" else "USB_PERMISSION_DENIED"
+          "bluetooth" -> if (btDriver.isBluetoothEnabled) "PRINTER_DISCONNECTED" else "BLUETOOTH_OFF"
+          else -> "PRINTER_DISCONNECTED"
+        }
         emitStatus()
       }
     }
 
+    if (lastPrintFailureCode == null) {
+      lastPrintFailureCode = "PRINTER_DISCONNECTED"
+    }
     emitDisconnectedAfterPrintFailure("No printer connected")
     return false
   }
@@ -789,6 +814,8 @@ class PrinterManager(private val context: Context) {
   }
 
   private fun currentPrintFailureCode(): String {
+    lastPrintFailureCode?.let { return it }
+
     val activeType = when {
       btDriver.isConnected -> "bluetooth"
       usbDriver.isConnected -> "usb"
