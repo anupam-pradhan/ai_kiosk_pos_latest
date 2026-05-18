@@ -1,6 +1,5 @@
 package com.example.ai_kiosk_pos.printer
 
-import java.nio.charset.Charset
 import android.util.Log
 
 /**
@@ -16,9 +15,6 @@ object EscPosCommands {
   // ═══════════════════════════════════════════════════════════
 
   private const val LINE_WIDTH = 42  // Sunmi SM X200 80mm = 42 chars at Font A
-  // Use US-ASCII as the base; the text() helper swaps £ → 0x9C
-  // (its position in the default Code Page 437 that all thermal printers use).
-  private val CHARSET: Charset = Charsets.US_ASCII
 
   // ═══════════════════════════════════════════════════════════
   // ESC/POS Control Bytes
@@ -80,20 +76,21 @@ object EscPosCommands {
   // Text Helpers
   // ═══════════════════════════════════════════════════════════
 
-  /** Convert string to bytes, replacing £ with its CP437 byte (0x9C) */
+  /**
+   * Convert string to bytes for ESC/POS (Code Page 437 / 858 printers).
+   *
+   * Bug #5 fix: encode as ISO-8859-1 (Latin-1) so all single-byte
+   * characters survive exactly. Then swap 0xA3 (Latin-1 £, U+00A3)
+   * → 0x9C (CP437 £). No placeholder needed, so a string containing
+   * both £ and $ is never corrupted.
+   */
   fun text(s: String): ByteArray {
-    // Replace the Unicode £ (U+00A3) with a placeholder, encode as ASCII,
-    // then swap the placeholder byte with 0x9C (£ in Code Page 437).
-    val safe = s.replace('\u00A3', '\u0024') // temporarily use $
-    val bytes = safe.toByteArray(CHARSET)
-    // Now replace every $ that was originally £ back to 0x9C
-    var srcIdx = 0
+    // ISO-8859-1 maps U+0000–U+00FF 1-to-1, so no index shifting.
+    val bytes = s.toByteArray(Charsets.ISO_8859_1)
     for (i in bytes.indices) {
-      // Walk the original string to check if this position was a £
-      if (srcIdx < s.length && s[srcIdx] == '\u00A3') {
+      if (bytes[i] == 0xA3.toByte()) { // Latin-1 £ → CP437 £
         bytes[i] = 0x9C.toByte()
       }
-      srcIdx++
     }
     return bytes
   }
@@ -272,11 +269,10 @@ object EscPosCommands {
     add(divider())
 
     // ── Column Header ──
+    // Bug #13: Use twoColumn() so spacing matches the totals rows exactly.
+    // "Qty  Item" is 9 chars; align "Price" to the right.
     add(BOLD_ON)
-    add(itemLine(0, "Item", "Price").let { line ->
-      // Replace leading " 0   " with "Qty  "
-      textLn("Qty  Item${" ".repeat(LINE_WIDTH - 4 - 4 - 5)}Price")
-    })
+    add(twoColumn("Qty  Item", "Price"))
     add(BOLD_OFF)
     add(divider())
 

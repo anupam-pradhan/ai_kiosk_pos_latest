@@ -235,6 +235,7 @@ class BluetoothPrinterDriver(private val context: Context) {
    * Automatically attempts reconnect if the connection was lost.
    */
   suspend fun print(data: ByteArray): Boolean = withContext(Dispatchers.IO) {
+    // Bug #11: Capture address before any reconnect attempt to avoid ghost state
     val address = connectedDeviceAddress
 
     // Attempt reconnect if socket died
@@ -242,14 +243,18 @@ class BluetoothPrinterDriver(private val context: Context) {
       Log.w(TAG, "Connection lost, attempting reconnect to $address...")
       val reconnected = connect(address)
       if (!reconnected) {
-        Log.e(TAG, "Reconnect failed")
+        Log.e(TAG, "Reconnect failed — clearing stale connection state")
+        // disconnect() is already called inside connect() on failure,
+        // so connectedDevice is already null here. Explicit for clarity:
+        disconnect()
         return@withContext false
       }
     }
 
+    // Bug #11: Use isConnectionHealthy (checks both socket AND outputStream)
     val stream = outputStream
-    if (stream == null || !isConnected) {
-      Log.e(TAG, "No active printer connection")
+    if (stream == null || !isConnectionHealthy) {
+      Log.e(TAG, "No healthy printer connection")
       return@withContext false
     }
 
@@ -274,7 +279,7 @@ class BluetoothPrinterDriver(private val context: Context) {
 
     } catch (e: IOException) {
       Log.e(TAG, "Print failed: ${e.message}", e)
-      // Connection likely broken
+      // Connection likely broken — clear state so ghost is not left behind
       disconnect()
       return@withContext false
     }

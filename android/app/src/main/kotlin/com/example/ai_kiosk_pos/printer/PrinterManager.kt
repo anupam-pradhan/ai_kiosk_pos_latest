@@ -873,9 +873,10 @@ class PrinterManager(private val context: Context) {
     if (monitorStarted) return
     monitorStarted = true
     scope.launch(Dispatchers.IO) {
-      while (true) {
+      // Bug #12: Check isActive so the loop exits cleanly on scope.cancel()
+      while (isActive) {
         delay(5_000)
-        disconnectIfConnectionLost("monitor")
+        if (isActive) disconnectIfConnectionLost("monitor")
       }
     }
   }
