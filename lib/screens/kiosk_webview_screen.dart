@@ -51,6 +51,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   StreamSubscription<bool>? _readerDisconnectSub;
   StreamSubscription<bool>? _readerConnectSub;
   String _lastPrewarmKey = '';
+  // Track whether we've loaded successfully at least once in this session
+  // (used to decide if resume should trigger a refresh).
+  bool _hasLoadedOnce = false;
 
   /// Tracks whether we've had a successful payment → reader is connected.
   /// When true, skip the prepare dialog entirely for instant NFC screen.
@@ -199,6 +202,22 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
       _checkDeveloperOptionsOnResume();
       if (AppConfig.isPrinterEnabled) {
         unawaited(_emitCurrentPrinterStatusToWeb());
+      }
+      // On resume, silently reload so any web deployment pushed while the
+      // app was backgrounded is picked up. Cache-Control: no-cache header
+      // tells the server to revalidate — if content unchanged the server
+      // returns 304 and the cached JS/CSS is reused (fast). Only skip
+      // during active payment to avoid interrupting the user.
+      if (_hasLoadedOnce && !_isPaymentProcessing) {
+        _webViewController?.loadUrl(
+          urlRequest: URLRequest(
+            url: WebUri(kioskUrl),
+            headers: {
+              'Cache-Control': 'no-cache, no-store',
+              'Pragma': 'no-cache',
+            },
+          ),
+        );
       }
     }
   }
@@ -1177,7 +1196,17 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
             Offstage(
               offstage: !_showWebView,
               child: InAppWebView(
-                initialUrlRequest: URLRequest(url: WebUri(kioskUrl)),
+                initialUrlRequest: URLRequest(
+                  url: WebUri(kioskUrl),
+                  // no-cache header: tells the server to revalidate index.html
+                  // on every launch. The hashed JS/CSS assets still cache
+                  // correctly. When offline, LOAD_DEFAULT falls back to the
+                  // local cache without needing a URL query param match.
+                  headers: {
+                    'Cache-Control': 'no-cache, no-store',
+                    'Pragma': 'no-cache',
+                  },
+                ),
                 initialSettings: InAppWebViewSettings(
                   javaScriptEnabled: true,
                   domStorageEnabled: true,
@@ -1207,7 +1236,8 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                 onLoadStop: (controller, url) {
                   if (!mounted) return;
                   _pageLoaded = true;
-                  _retryCount = 0; // Reset retry counter on successful load
+                  _hasLoadedOnce = true;
+                  _retryCount = 0;
                   _retryTimer?.cancel();
                   _maybeHideSplash();
                   setState(() {
