@@ -54,6 +54,10 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   // Track whether we've loaded successfully at least once in this session
   // (used to decide if resume should trigger a refresh).
   bool _hasLoadedOnce = false;
+  // Epoch-seconds of the last time the page fully loaded.
+  // Used to time-gate the resume reload (minimum 5 min between reloads).
+  int _lastLoadedAt = 0;
+  static const int _minReloadIntervalSeconds = 5 * 60; // 5 minutes
 
   /// Tracks whether we've had a successful payment → reader is connected.
   /// When true, skip the prepare dialog entirely for instant NFC screen.
@@ -206,18 +210,25 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
       // On resume, silently reload so any web deployment pushed while the
       // app was backgrounded is picked up. Cache-Control: no-cache header
       // tells the server to revalidate — if content unchanged the server
-      // returns 304 and the cached JS/CSS is reused (fast). Only skip
-      // during active payment to avoid interrupting the user.
+      // returns 304 and the cached JS/CSS is reused (fast).
+      // Time-gated to 5 min minimum to avoid reloading on every app-switch.
+      // Never reloads during an active payment.
       if (_hasLoadedOnce && !_isPaymentProcessing) {
-        _webViewController?.loadUrl(
-          urlRequest: URLRequest(
-            url: WebUri(kioskUrl),
-            headers: {
-              'Cache-Control': 'no-cache, no-store',
-              'Pragma': 'no-cache',
-            },
-          ),
-        );
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        if (now - _lastLoadedAt >= _minReloadIntervalSeconds) {
+          _debugService.log(
+            '🔄 Resume reload: ${now - _lastLoadedAt}s since last load',
+          );
+          _webViewController?.loadUrl(
+            urlRequest: URLRequest(
+              url: WebUri(kioskUrl),
+              headers: {
+                'Cache-Control': 'no-cache, no-store',
+                'Pragma': 'no-cache',
+              },
+            ),
+          );
+        }
       }
     }
   }
@@ -1237,6 +1248,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                   if (!mounted) return;
                   _pageLoaded = true;
                   _hasLoadedOnce = true;
+                  _lastLoadedAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
                   _retryCount = 0;
                   _retryTimer?.cancel();
                   _maybeHideSplash();
