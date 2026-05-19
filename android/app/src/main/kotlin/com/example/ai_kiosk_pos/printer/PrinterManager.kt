@@ -76,6 +76,13 @@ class PrinterManager(private val context: Context) {
   private var lastPrintFailureCode: String? = null
   private val printMutex = Mutex()
   @Volatile private var isPrinting = false
+  @Volatile private var lastPrintFinishedAt = 0L
+
+  /** Grace period after a print job — avoids tearing down BT while the printer is still busy. */
+  private fun isPrintSettling(): Boolean {
+    if (isPrinting) return true
+    return System.currentTimeMillis() - lastPrintFinishedAt < 4_000L
+  }
 
   init {
     registerUsbDetachReceiver()
@@ -231,7 +238,7 @@ class PrinterManager(private val context: Context) {
    */
   fun connectPrinter(args: Map<*, *>, result: MethodChannel.Result) {
     val address = args["address"] as? String
-    val type = args["type"] as? String ?: "bluetooth"
+    val type = (args["type"] as? String ?: args["printerType"] as? String) ?: "bluetooth"
 
     if (address.isNullOrBlank()) {
       result.success(errorResponse("PRINTER_DISCONNECTED", "Printer address is required"))
@@ -370,13 +377,9 @@ class PrinterManager(private val context: Context) {
    * Get current printer connection status.
    */
   fun getPrinterStatus(result: MethodChannel.Result) {
-    scope.launch(Dispatchers.IO) {
-      disconnectIfConnectionLost("status check")
-      val status = currentStatusMap()
-      scope.launch(Dispatchers.Main) {
-        result.success(status + mapOf("status" to status))
-      }
-    }
+    // Read-only — never disconnect here; frequent WebView polls were killing BT links.
+    val status = currentStatusMap()
+    result.success(status + mapOf("status" to status))
   }
 
   /**
@@ -609,116 +612,109 @@ class PrinterManager(private val context: Context) {
       printBytesLocked(data)
     } finally {
       isPrinting = false
+      lastPrintFinishedAt = System.currentTimeMillis()
     }
   }
 
   private suspend fun printBytesLocked(data: ByteArray): Boolean {
     lastPrintFailureCode = null
 
-    if (btDriver.isConnected && !btDriver.isConnectionHealthy) {
-      btDriver.disconnect()
-    }
-    if (usbDriver.isConnected && !usbDriver.isConnectionHealthy) {
-      usbDriver.disconnect()
-    }
-
-    // Try Bluetooth first
-    if (btDriver.isConnectionHealthy) {
-      val ok = btDriver.print(data)
-      if (!ok) {
-        lastPrintFailureCode = "PRINTER_DISCONNECTED"
-        reportPrintFailure("Bluetooth print failed")
-      }
-      return ok
-    }
-
-    // Try USB
-    if (usbDriver.isConnectionHealthy) {
-      val ok = usbDriver.print(data)
-      if (!ok) {
-        lastPrintFailureCode = "PRINTER_DISCONNECTED"
-        reportPrintFailure("USB print failed")
-      }
-      return ok
-    }
-
-    // Try WiFi
-    if (wifiDriver.isConnectionHealthy) {
-      val ok = wifiDriver.print(data)
-      if (!ok) {
-        lastPrintFailureCode = "PRINTER_DISCONNECTED"
-        reportPrintFailure("WiFi print failed")
-      }
-      return ok
-    }
-
-    // No active connection — try to reconnect to last known printer
-    val lastAddress = prefs.getString(KEY_LAST_PRINTER_ADDRESS, null)
-    val lastType = prefs.getString(KEY_LAST_PRINTER_TYPE, null)
-
     if (manualDisconnectRequested) {
-      sendLog("ℹ️ Printer auto-reconnect skipped after manual disconnect")
       lastPrintFailureCode = "PRINTER_DISCONNECTED"
       emitStatus()
       return false
     }
 
-    if (lastAddress != null && lastType != null) {
+    // Active transport — prefer last saved type when multiple could be open.
+    val lastType = normalizePrinterType(prefs.getString(KEY_LAST_PRINTER_TYPE, "") ?: "")
+    val tryOrder = when (lastType) {
+      "usb" -> listOf("usb", "bluetooth", "wifi")
+      "wifi", "ethernet" -> listOf("wifi", "bluetooth", "usb")
+      else -> listOf("bluetooth", "usb", "wifi")
+    }
+
+    for (transport in tryOrder) {
+      val ok = printViaTransport(transport, data)
+      if (ok) return true
+    }
+
+    // Reconnect once to the saved printer, then print again.
+    val lastAddress = prefs.getString(KEY_LAST_PRINTER_ADDRESS, null)
+    val savedType = normalizePrinterType(prefs.getString(KEY_LAST_PRINTER_TYPE, "") ?: "")
+
+    if (!lastAddress.isNullOrBlank() && savedType.isNotBlank()) {
       sendLog("⟲ Auto-reconnecting to last printer...")
-      val reconnected = when (lastType) {
+      val reconnected = when (savedType) {
         "bluetooth" -> btDriver.connect(lastAddress)
         "usb" -> usbDriver.connect(lastAddress)
-        "wifi" -> wifiDriver.connect(lastAddress)
-        "ethernet" -> wifiDriver.connect(lastAddress)
+        "wifi", "ethernet" -> wifiDriver.connect(lastAddress)
         else -> false
       }
 
       if (reconnected) {
         emitStatus()
-        val ok = when (lastType) {
-          "bluetooth" -> btDriver.print(data)
-          "usb" -> usbDriver.print(data)
-          "wifi" -> wifiDriver.print(data)
-          "ethernet" -> wifiDriver.print(data)
-          else -> false
-        }
-        if (!ok) {
-          lastPrintFailureCode = "PRINTER_DISCONNECTED"
-          reportPrintFailure("Print failed after reconnect")
-        }
-        return ok
-      } else {
-        sendLog("⚠️ Auto-reconnect failed")
-        lastPrintFailureCode = when (normalizePrinterType(lastType)) {
-          "wifi", "ethernet" -> "NETWORK_UNREACHABLE"
-          "usb" -> if (usbDriver.allPrinterPermissionsGranted) "PRINTER_DISCONNECTED" else "USB_PERMISSION_DENIED"
-          "bluetooth" -> if (btDriver.isBluetoothEnabled) "PRINTER_DISCONNECTED" else "BLUETOOTH_OFF"
-          else -> "PRINTER_DISCONNECTED"
-        }
-        emitStatus()
+        val ok = printViaTransport(savedType, data)
+        if (ok) return true
+        lastPrintFailureCode = "PRINTER_DISCONNECTED"
+        reportPrintFailure("Print failed after reconnect")
+        return false
       }
+
+      sendLog("⚠️ Auto-reconnect failed")
+      lastPrintFailureCode = when (savedType) {
+        "wifi", "ethernet" -> "NETWORK_UNREACHABLE"
+        "usb" -> if (usbDriver.allPrinterPermissionsGranted) "PRINTER_DISCONNECTED" else "USB_PERMISSION_DENIED"
+        "bluetooth" -> if (btDriver.isBluetoothEnabled) "PRINTER_DISCONNECTED" else "BLUETOOTH_OFF"
+        else -> "PRINTER_DISCONNECTED"
+      }
+      emitStatus()
+      return false
     }
 
-    if (lastPrintFailureCode == null) {
-      lastPrintFailureCode = "PRINTER_DISCONNECTED"
-    }
+    lastPrintFailureCode = "PRINTER_DISCONNECTED"
     reportPrintFailure("No printer connected")
     return false
   }
 
+  private suspend fun printViaTransport(transport: String, data: ByteArray): Boolean {
+    return when (normalizePrinterType(transport)) {
+      "bluetooth" -> {
+        if (!btDriver.isConnectionHealthy) return false
+        val ok = btDriver.print(data)
+        if (!ok) {
+          sendLog("⚠️ Bluetooth print failed")
+          lastPrintFailureCode = "PRINTER_DISCONNECTED"
+        }
+        ok
+      }
+      "usb" -> {
+        if (!usbDriver.isConnectionHealthy) return false
+        val ok = usbDriver.print(data)
+        if (!ok) {
+          sendLog("⚠️ USB print failed")
+          lastPrintFailureCode = "PRINTER_DISCONNECTED"
+        }
+        ok
+      }
+      "wifi", "ethernet" -> {
+        if (!wifiDriver.isConnectionHealthy) return false
+        val ok = wifiDriver.print(data)
+        if (!ok) {
+          sendLog("⚠️ WiFi print failed")
+          lastPrintFailureCode = "PRINTER_DISCONNECTED"
+        }
+        ok
+      }
+      else -> false
+    }
+  }
+
   /**
-   * Log print failure and disconnect drivers only when no transport is healthy.
-   * Avoids tearing down BT after a successful write when health check is briefly stale.
+   * Log print failure without force-closing sockets.
+   * Abrupt disconnects cause error beeps on many thermal printers.
    */
   private fun reportPrintFailure(reason: String) {
     sendLog("⚠️ Printer unavailable: $reason")
-    val anyHealthy =
-      btDriver.isConnectionHealthy ||
-        usbDriver.isConnectionHealthy ||
-        wifiDriver.isConnectionHealthy
-    if (!anyHealthy) {
-      disconnectDrivers()
-    }
     emitStatus()
   }
 
@@ -920,16 +916,20 @@ class PrinterManager(private val context: Context) {
   }
 
   private suspend fun disconnectIfConnectionLost(reason: String): Boolean {
-    if (isPrinting) return false
+    if (isPrintSettling()) return false
 
     val wifiLost = wifiDriver.isConnected && !wifiDriver.verifyConnection()
-    val lost = (btDriver.isConnected && !btDriver.isConnectionHealthy) ||
-      (usbDriver.isConnected && !usbDriver.isConnectionHealthy) ||
-      wifiLost
+    val btLost = btDriver.isConnected && !btDriver.isConnectionHealthy
+    val usbLost = usbDriver.isConnected && !usbDriver.isConnectionHealthy
+    val lost = btLost || usbLost || wifiLost
 
     if (lost) {
       sendLog("⚠️ Printer connection lost ($reason)")
-      disconnectDrivers()
+      when {
+        btLost -> btDriver.disconnect()
+        usbLost -> usbDriver.disconnect()
+        wifiLost -> wifiDriver.disconnect()
+      }
       emitStatus()
     }
 
@@ -940,9 +940,8 @@ class PrinterManager(private val context: Context) {
     if (monitorStarted) return
     monitorStarted = true
     scope.launch(Dispatchers.IO) {
-      // Bug #12: Check isActive so the loop exits cleanly on scope.cancel()
       while (isActive) {
-        delay(5_000)
+        delay(20_000)
         if (isActive) disconnectIfConnectionLost("monitor")
       }
     }
@@ -978,6 +977,10 @@ class PrinterManager(private val context: Context) {
       override fun onReceive(ctx: Context, intent: Intent) {
         when (intent.action) {
           BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
+            if (isPrintSettling()) {
+              sendLog("ℹ️ Ignoring Bluetooth ACL disconnect during print settling")
+              return
+            }
             val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
               intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
             } else {

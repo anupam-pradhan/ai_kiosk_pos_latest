@@ -42,10 +42,11 @@ class BluetoothPrinterDriver(private val context: Context) {
   private var connectedDevice: BluetoothDevice? = null
 
   val isConnected: Boolean
-    get() = socket?.isConnected == true
+    get() = socket != null && outputStream != null
 
+  /** socket.isConnected is unreliable on many SPP thermal printers — use open streams instead. */
   val isConnectionHealthy: Boolean
-    get() = isBluetoothEnabled && socket?.isConnected == true && outputStream != null
+    get() = isBluetoothEnabled && socket != null && outputStream != null
 
   val connectedDeviceName: String?
     get() = connectedDevice?.name
@@ -235,23 +236,17 @@ class BluetoothPrinterDriver(private val context: Context) {
    * Automatically attempts reconnect if the connection was lost.
    */
   suspend fun print(data: ByteArray): Boolean = withContext(Dispatchers.IO) {
-    // Bug #11: Capture address before any reconnect attempt to avoid ghost state
     val address = connectedDeviceAddress
 
-    // Attempt reconnect if socket died
-    if (!isConnected && address != null) {
-      Log.w(TAG, "Connection lost, attempting reconnect to $address...")
-      val reconnected = connect(address)
-      if (!reconnected) {
+    if (!isConnectionHealthy && address != null) {
+      Log.w(TAG, "Connection unhealthy, attempting reconnect to $address...")
+      if (!connect(address)) {
         Log.e(TAG, "Reconnect failed — clearing stale connection state")
-        // disconnect() is already called inside connect() on failure,
-        // so connectedDevice is already null here. Explicit for clarity:
         disconnect()
         return@withContext false
       }
     }
 
-    // Bug #11: Use isConnectionHealthy (checks both socket AND outputStream)
     val stream = outputStream
     if (stream == null || !isConnectionHealthy) {
       Log.e(TAG, "No healthy printer connection")
@@ -259,46 +254,64 @@ class BluetoothPrinterDriver(private val context: Context) {
     }
 
     try {
-      // Adaptive pacing — large ESC/POS jobs need smaller chunks + longer gaps.
-      val chunkSize = when {
-        data.size > 32_768 -> 128
-        data.size > 8_192 -> 192
-        else -> 256
-      }
-      val interChunkMs = when {
-        data.size > 32_768 -> 100L
-        data.size > 8_192 -> 80L
-        else -> 60L
-      }
-      val postPrintMs = when {
-        data.size > 32_768 -> 500L
-        data.size > 8_192 -> 400L
-        else -> 300L
-      }
+      writeChunks(stream, data)
+      Log.i(TAG, "Print data sent: ${data.size} bytes ✅")
+      return@withContext true
+    } catch (e: IOException) {
+      Log.e(TAG, "Print failed: ${e.message}", e)
+      disconnect()
 
-      var offset = 0
-      while (offset < data.size) {
-        val end = minOf(offset + chunkSize, data.size)
-        stream.write(data, offset, end - offset)
-        stream.flush()
-        offset = end
-
-        if (offset < data.size) {
-          Thread.sleep(interChunkMs)
+      if (address != null) {
+        Log.w(TAG, "Retrying print after reconnect to $address...")
+        if (connect(address)) {
+          val retryStream = outputStream
+          if (retryStream != null && isConnectionHealthy) {
+            try {
+              writeChunks(retryStream, data)
+              Log.i(TAG, "Print retry succeeded: ${data.size} bytes ✅")
+              return@withContext true
+            } catch (retryError: IOException) {
+              Log.e(TAG, "Print retry failed: ${retryError.message}", retryError)
+              disconnect()
+            }
+          }
         }
       }
 
-      Thread.sleep(postPrintMs)
-
-      Log.i(TAG, "Print data sent: ${data.size} bytes ✅")
-      return@withContext true
-
-    } catch (e: IOException) {
-      Log.e(TAG, "Print failed: ${e.message}", e)
-      // Connection likely broken — clear state so ghost is not left behind
-      disconnect()
       return@withContext false
     }
+  }
+
+  private fun writeChunks(stream: OutputStream, data: ByteArray) {
+    val chunkSize = when {
+      data.size > 32_768 -> 128
+      data.size > 8_192 -> 192
+      else -> 256
+    }
+    val interChunkMs = when {
+      data.size > 32_768 -> 100L
+      data.size > 8_192 -> 80L
+      else -> 60L
+    }
+    val postPrintMs = when {
+      data.size > 32_768 -> 500L
+      data.size > 8_192 -> 400L
+      else -> 300L
+    }
+
+    var offset = 0
+    while (offset < data.size) {
+      val end = minOf(offset + chunkSize, data.size)
+      stream.write(data, offset, end - offset)
+      stream.flush()
+      offset = end
+
+      if (offset < data.size) {
+        Thread.sleep(interChunkMs)
+      }
+    }
+
+    Thread.sleep(postPrintMs)
   }
 
   private fun hasBluetoothPermission(): Boolean {

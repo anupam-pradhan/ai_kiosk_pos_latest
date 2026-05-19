@@ -59,7 +59,8 @@ class PrinterService {
   // Connection
   // ═════════════════════════════════════════════════════════
 
-  /// Connect to a printer by address and type ('bluetooth' or 'usb').
+  /// Connect to a printer by address and type
+  /// ('bluetooth', 'usb', 'wifi', or 'ethernet').
   Future<Map<String, dynamic>> connectPrinter(
     String address,
     String type,
