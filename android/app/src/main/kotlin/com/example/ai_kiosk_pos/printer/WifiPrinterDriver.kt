@@ -48,6 +48,29 @@ class WifiPrinterDriver {
     get() = _connectedAddress
 
   /**
+   * Verify a live TCP socket. Socket.isConnected can remain true after a
+   * printer is powered off, so status polling needs one active probe.
+   */
+  suspend fun verifyConnection(): Boolean = withContext(Dispatchers.IO) {
+    val sock = socket
+    if (sock == null || sock.isClosed || outputStream == null) {
+      return@withContext false
+    }
+    try {
+      sock.sendUrgentData(0xFF)
+      true
+    } catch (e: IOException) {
+      Log.w(TAG, "WiFi printer health probe failed: ${e.message}")
+      disconnect()
+      false
+    } catch (e: Exception) {
+      Log.w(TAG, "WiFi printer health probe failed: ${e.message}")
+      disconnect()
+      false
+    }
+  }
+
+  /**
    * Best-effort LAN discovery for ESC/POS network printers on port 9100.
    * Keeps timeout short so the printer popup is not blocked for long.
    */
@@ -191,7 +214,7 @@ class WifiPrinterDriver {
     }
 
     try {
-      // Write in chunks
+      // Write in chunks so slower network print servers do not drop data.
       val chunkSize = 1024
       var offset = 0
       while (offset < data.size) {

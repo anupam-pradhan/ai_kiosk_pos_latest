@@ -259,8 +259,9 @@ class BluetoothPrinterDriver(private val context: Context) {
     }
 
     try {
-      // Write in chunks to avoid buffer overflow on some printers
-      val chunkSize = 1024
+      // Use conservative chunks; many thermal Bluetooth modules drop or
+      // disconnect mid-receipt if large order payloads are written too fast.
+      val chunkSize = 256
       var offset = 0
       while (offset < data.size) {
         val end = minOf(offset + chunkSize, data.size)
@@ -268,9 +269,9 @@ class BluetoothPrinterDriver(private val context: Context) {
         stream.flush()
         offset = end
 
-        // Small delay between chunks for slower printers
+        // Small delay between chunks for slower printers.
         if (offset < data.size) {
-          Thread.sleep(50)
+          Thread.sleep(60)
         }
       }
 

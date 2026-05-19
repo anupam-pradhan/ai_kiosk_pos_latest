@@ -367,9 +367,7 @@ class PrinterManager(private val context: Context) {
    */
   fun getPrinterStatus(result: MethodChannel.Result) {
     scope.launch(Dispatchers.IO) {
-      if (currentStatusMap()["connected"] != true && !manualDisconnectRequested) {
-        reconnectLastPrinterQuietly()
-      }
+      disconnectIfConnectionLost("status check")
       val status = currentStatusMap()
       scope.launch(Dispatchers.Main) {
         result.success(status + mapOf("status" to status))
@@ -898,9 +896,10 @@ class PrinterManager(private val context: Context) {
   }
 
   private suspend fun disconnectIfConnectionLost(reason: String): Boolean {
+    val wifiLost = wifiDriver.isConnected && !wifiDriver.verifyConnection()
     val lost = (btDriver.isConnected && !btDriver.isConnectionHealthy) ||
       (usbDriver.isConnected && !usbDriver.isConnectionHealthy) ||
-      (wifiDriver.isConnected && !wifiDriver.isConnectionHealthy)
+      wifiLost
 
     if (lost) {
       sendLog("⚠️ Printer connection lost ($reason)")
