@@ -567,21 +567,10 @@ class PrinterManager(private val context: Context) {
         val decodedHasInit = hasEscPosInit(decodedBytes)
         val decodedHasCut = hasEscPosCut(decodedBytes)
         val normalizedRawBytes = normalizeRawPrintBytes(decodedBytes, jobType)
-        val receiptForcedNative = jobType == "receipt" && receiptPayload != null
-        val bytes = if (receiptForcedNative) {
-          val nativeBytes = EscPosCommands.buildReceipt(normalizePayloadMap(receiptPayload))
-          sendLog(
-            "Receipt job forced to native renderer (${nativeBytes.size} bytes); raw bytes kept for debug only"
-          )
-          nativeBytes
-        } else {
-          normalizedRawBytes
-        }
+        val bytes = normalizedRawBytes
         val normalizedChanged = bytes.size != decodedBytes.size
         val safeCopies = copies.coerceIn(1, 5)
-        val label = if (receiptForcedNative) {
-          "native receipt"
-        } else if (jobType.isNullOrBlank()) {
+        val label = if (jobType.isNullOrBlank()) {
           "raw data"
         } else {
           "raw $jobType"
@@ -603,7 +592,7 @@ class PrinterManager(private val context: Context) {
           }
         }
 
-        if (!allOk && jobType == "receipt" && receiptPayload != null && !receiptForcedNative) {
+        if (!allOk && jobType == "receipt" && receiptPayload != null) {
           sendLog("Raw receipt failed; trying native receipt fallback...")
           val nativeBytes = EscPosCommands.buildReceipt(normalizePayloadMap(receiptPayload))
           allOk = true
@@ -632,9 +621,7 @@ class PrinterManager(private val context: Context) {
         scope.launch(Dispatchers.Main) {
           if (allOk) {
             sendLog("✅ Raw print complete ($safeCopies copies)")
-            if (receiptForcedNative) {
-              sendLog("Receipt printed with native renderer from PRINT_RAW payload")
-            } else if (jobType == "receipt" || jobType == "kot" || jobType == "summary") {
+            if (jobType == "receipt" || jobType == "kot" || jobType == "summary") {
               sendLog("Raw ${jobType} transport accepted; no native fallback was used")
             }
             result.success(mapOf(
