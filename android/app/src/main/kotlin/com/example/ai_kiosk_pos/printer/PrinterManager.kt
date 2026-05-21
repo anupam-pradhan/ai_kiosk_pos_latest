@@ -567,7 +567,7 @@ class PrinterManager(private val context: Context) {
         val decodedHasInit = hasEscPosInit(decodedBytes)
         val decodedHasCut = hasEscPosCut(decodedBytes)
         val normalizedRawBytes = normalizeRawPrintBytes(decodedBytes, jobType)
-        val useNativeReceiptFallback = jobType == "receipt" && receiptPayload != null
+        val useNativeReceiptFallback = jobType?.startsWith("receipt") == true && receiptPayload != null
         val bytes = if (useNativeReceiptFallback) {
           sendLog("Debug native receipt fallback enabled; printing receiptPayload instead of raw web ESC/POS")
           EscPosCommands.buildReceipt(receiptPayload.toStringKeyMap())
@@ -603,7 +603,7 @@ class PrinterManager(private val context: Context) {
         scope.launch(Dispatchers.Main) {
           if (allOk) {
             sendLog("✅ Raw print complete ($safeCopies copies)")
-            if (jobType == "receipt" || jobType == "kot" || jobType == "summary") {
+            if (jobType?.startsWith("receipt") == true || jobType?.startsWith("kot") == true || jobType?.startsWith("summary") == true) {
               sendLog("Raw ${jobType} transport accepted; nativeFallback=$useNativeReceiptFallback")
             }
             result.success(mapOf(
@@ -632,27 +632,64 @@ class PrinterManager(private val context: Context) {
     // PRINT_RAW is intentionally a strict transport layer. For receipt jobs,
     // ensure the data is safe for web-generated ESC/POS by stripping unsupported
     // commands and leaving only a minimal init + plain text + line feeds.
-    if (jobType == "receipt") {
+    if (jobType?.startsWith("receipt") == true) {
       return sanitizeReceiptBytes(bytes)
     }
     return bytes
   }
 
   private fun sanitizeReceiptBytes(bytes: ByteArray): ByteArray {
-    // Force receipt payloads into a minimal safe ESC/POS format:
-    //   ESC @
-    //   plain ASCII text only
-    //   LF line feeds
-    //   no font, line spacing, image, barcode, drawer, cutter, codepage, or binary graphics bytes
+    // Preserve safe receipt ESC/POS commands from the web builder while
+    // rejecting unsupported or binary flows.
     val cleaned = mutableListOf<Byte>()
     cleaned.addAll(byteArrayOf(0x1B, 0x40).toList())
 
     var index = 0
     while (index < bytes.size) {
       val value = bytes[index].toInt() and 0xFF
-      if (value == 0x1B || value == 0x1D || value == 0x10 || value == 0x12 ||
-          value == 0x14 || value == 0x18 || value == 0x1C || value == 0x1F) {
-        // Skip ESC/POS control byte and its immediate command byte.
+      if (value == 0x1B && index + 1 < bytes.size) {
+        val next = bytes[index + 1].toInt() and 0xFF
+        when (next) {
+          0x40, // ESC @
+          0x61, // ESC a n
+          0x45, // ESC E n
+          0x47, // ESC G n
+          0x4D, // ESC M n
+          0x21  // ESC ! n
+          -> {
+            cleaned.add(bytes[index])
+            cleaned.add(bytes[index + 1])
+            index += 2
+            continue
+          }
+        }
+        index += 1
+        if (index < bytes.size) index += 1
+        continue
+      }
+
+      if (value == 0x1D && index + 1 < bytes.size) {
+        val next = bytes[index + 1].toInt() and 0xFF
+        when (next) {
+          0x42 -> { // GS B n
+            if (index + 2 < bytes.size) {
+              cleaned.add(bytes[index])
+              cleaned.add(bytes[index + 1])
+              cleaned.add(bytes[index + 2])
+              index += 3
+              continue
+            }
+          }
+          0x56 -> { // GS V n
+            if (index + 2 < bytes.size) {
+              cleaned.add(bytes[index])
+              cleaned.add(bytes[index + 1])
+              cleaned.add(bytes[index + 2])
+              index += 3
+              continue
+            }
+          }
+        }
         index += 1
         if (index < bytes.size) index += 1
         continue
@@ -908,6 +945,12 @@ class PrinterManager(private val context: Context) {
         "type" to ""
       )
     }
+    val hardwareStatus = when (connectedStatus["type"]) {
+      "bluetooth" -> btDriver.realtimeStatus
+      "usb" -> usbDriver.realtimeStatus
+      "wifi", "ethernet" -> wifiDriver.realtimeStatus
+      else -> printerHardwareStatusUnavailable("not_connected")
+    }
 
     return connectedStatus + mapOf(
       "autoPrintEnabled" to prefs.getBoolean(KEY_AUTO_PRINT_ENABLED, true),
@@ -918,7 +961,40 @@ class PrinterManager(private val context: Context) {
       "bluetoothEnabled" to btDriver.isBluetoothEnabled,
       "bluetoothPermissionGranted" to (btDriver.hasPermission && btDriver.hasScanPermission),
       "locationPermissionGranted" to hasLocationPermission(),
-      "usbPermissionGranted" to usbDriver.allPrinterPermissionsGranted
+      "usbPermissionGranted" to usbDriver.allPrinterPermissionsGranted,
+      "printerHardwareStatus" to hardwareStatus,
+      "printerStatusAvailable" to (hardwareStatus["available"] == true),
+      "printerStatusMessage" to (hardwareStatus["message"]?.toString() ?: ""),
+      "printerStatusIssues" to (hardwareStatus["issues"] ?: emptyList<String>()),
+      "printerStatusCheckedAt" to (hardwareStatus["checkedAt"] ?: 0L),
+      "paperEnd" to (hardwareStatus["paperEnd"] == true),
+      "paperNearEnd" to (hardwareStatus["paperNearEnd"] == true),
+      "coverOpen" to (hardwareStatus["coverOpen"] == true),
+      "cutterError" to (hardwareStatus["cutterError"] == true),
+      "printerOffline" to (hardwareStatus["printerOffline"] == true),
+      "mechanicalError" to (hardwareStatus["mechanicalError"] == true),
+      "printingStopped" to (hardwareStatus["printingStopped"] == true),
+      "feedButtonPressed" to (hardwareStatus["feedButtonPressed"] == true),
+      "unrecoverableError" to (hardwareStatus["unrecoverableError"] == true),
+      "autoRecoverableError" to (hardwareStatus["autoRecoverableError"] == true)
+    )
+  }
+
+  private fun printerHardwareStatusUnavailable(message: String): Map<String, Any> {
+    return mapOf(
+      "available" to false,
+      "message" to message,
+      "issues" to listOf(message),
+      "paperEnd" to false,
+      "paperNearEnd" to false,
+      "coverOpen" to false,
+      "cutterError" to false,
+      "printerOffline" to false,
+      "mechanicalError" to false,
+      "printingStopped" to false,
+      "feedButtonPressed" to false,
+      "unrecoverableError" to false,
+      "autoRecoverableError" to false
     )
   }
 
@@ -1103,10 +1179,31 @@ class PrinterManager(private val context: Context) {
     if (monitorStarted) return
     monitorStarted = true
     scope.launch(Dispatchers.IO) {
+      var lastEmittedStatus: Map<String, Any>? = null
       while (isActive) {
-        delay(20_000)
-        if (isActive) disconnectIfConnectionLost("monitor")
+        delay(3_000)
+        if (!isActive) continue
+        if (disconnectIfConnectionLost("monitor")) {
+          lastEmittedStatus = currentStatusMap()
+          continue
+        }
+        if (isPrintSettling()) continue
+
+        refreshHardwareStatus("monitor")
+        val status = currentStatusMap()
+        if (status != lastEmittedStatus) {
+          emitStatus(status)
+          lastEmittedStatus = status
+        }
       }
+    }
+  }
+
+  private suspend fun refreshHardwareStatus(reason: String) {
+    when {
+      btDriver.isConnectionHealthy -> btDriver.refreshRealtimeStatus(reason)
+      usbDriver.isConnectionHealthy -> usbDriver.refreshRealtimeStatus(reason)
+      wifiDriver.isConnectionHealthy -> wifiDriver.refreshRealtimeStatus(reason)
     }
   }
 
