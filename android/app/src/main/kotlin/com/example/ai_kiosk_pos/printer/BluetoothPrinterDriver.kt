@@ -293,18 +293,18 @@ class BluetoothPrinterDriver(private val context: Context) {
 
   private fun writeChunks(stream: OutputStream, data: ByteArray) {
     val chunkSize = when {
-      data.size > 32_768 -> 128
-      data.size > 8_192 -> 192
-      else -> 256
+      data.size > 32_768 -> 96
+      data.size > 8_192 -> 128
+      else -> 192
     }
     val interChunkMs = when {
-      data.size > 32_768 -> 100L
-      data.size > 8_192 -> 80L
-      else -> 60L
+      data.size > 32_768 -> 140L
+      data.size > 8_192 -> 110L
+      else -> 70L
     }
     val postPrintMs = when {
-      data.size > 32_768 -> 800L
-      data.size > 8_192 -> 600L
+      data.size > 32_768 -> 1_200L
+      data.size > 8_192 -> 900L
       data.size > 512 -> 500L
       else -> 350L
     }
