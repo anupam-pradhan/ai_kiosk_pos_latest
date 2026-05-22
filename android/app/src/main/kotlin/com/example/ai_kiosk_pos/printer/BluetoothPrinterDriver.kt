@@ -277,82 +277,129 @@ class BluetoothPrinterDriver(private val context: Context) {
   suspend fun print(data: ByteArray): Boolean = withContext(Dispatchers.IO) {
     val address = connectedDeviceAddress
 
-    if (!isConnectionHealthy && address != null) {
-      Log.w(TAG, "Connection unhealthy, attempting reconnect to $address...")
+    val stream = outputStream
+    if (stream != null && isConnectionHealthy) {
+      Log.d(TAG, "Using open Bluetooth socket (${connectedDeviceName}, ${data.size}B)")
+    } else if (address != null) {
+      Log.w(TAG, "No open socket — connecting to $address before print (${data.size}B)...")
       if (!connect(address)) {
-        Log.e(TAG, "Reconnect failed — clearing stale connection state")
-        disconnect()
+        Log.e(TAG, "Connect-before-print failed")
         return@withContext false
       }
+      Thread.sleep(1_200L)
+    } else {
+      Log.e(TAG, "No Bluetooth printer connection or saved address")
+      return@withContext false
     }
 
-    val stream = outputStream
-    if (stream == null || !isConnectionHealthy) {
-      Log.e(TAG, "No healthy printer connection")
+    val activeStream = outputStream
+    if (activeStream == null || !isConnectionHealthy) {
+      Log.e(TAG, "No healthy printer stream after connect check")
       return@withContext false
     }
 
     try {
-      writeChunks(stream, data)
-      Log.i(TAG, "Print data sent: ${data.size} bytes ✅")
+      val startedAt = System.currentTimeMillis()
+      writeChunks(activeStream, data)
+      val elapsedMs = System.currentTimeMillis() - startedAt
+      Log.i(TAG, "Print data sent: ${data.size} bytes in ${elapsedMs}ms ✅")
       markRealtimeStatusDisabled("after print")
       return@withContext true
     } catch (e: IOException) {
-      Log.e(TAG, "Print failed: ${e.message}", e)
+      Log.e(TAG, "Print failed (${data.size}B): ${e.message}", e)
       disconnect()
 
-      if (address != null) {
-        Log.w(TAG, "Retrying print after reconnect to $address...")
-        if (connect(address)) {
-          val retryStream = outputStream
-          if (retryStream != null && isConnectionHealthy) {
-            try {
-              writeChunks(retryStream, data)
-              Log.i(TAG, "Print retry succeeded: ${data.size} bytes ✅")
-              markRealtimeStatusDisabled("after retry")
-              return@withContext true
-            } catch (retryError: IOException) {
-              Log.e(TAG, "Print retry failed: ${retryError.message}", retryError)
-              disconnect()
-            }
-          }
-        }
+      if (address == null) return@withContext false
+      if (data.size > 24_576) {
+        Log.e(
+          TAG,
+          "Skipping BT retry — payload ${data.size}B is too large (deploy compact web receipt or use native fallback)"
+        )
+        return@withContext false
       }
 
-      return@withContext false
+      Log.w(TAG, "Waiting for printer before reconnect...")
+      Thread.sleep(1_800L)
+
+      if (!connect(address)) {
+        Log.e(TAG, "Reconnect failed before print retry")
+        return@withContext false
+      }
+
+      Thread.sleep(1_500L)
+
+      val retryStream = outputStream
+      if (retryStream == null || !isConnectionHealthy) {
+        Log.e(TAG, "No healthy stream after reconnect")
+        return@withContext false
+      }
+
+      try {
+        Log.d(TAG, "Retrying Bluetooth print after reconnect (${data.size}B)")
+        writeChunks(retryStream, data)
+        Log.i(TAG, "Print retry succeeded: ${data.size} bytes ✅")
+        markRealtimeStatusDisabled("after retry")
+        return@withContext true
+      } catch (retryError: IOException) {
+        Log.e(TAG, "Print retry failed: ${retryError.message}", retryError)
+        disconnect()
+        return@withContext false
+      }
     }
   }
 
   private fun writeChunks(stream: OutputStream, data: ByteArray) {
     val chunkSize = when {
-      data.size > 32_768 -> 96
-      data.size > 8_192 -> 128
-      else -> 192
+      data.size > 16_384 -> 64
+      data.size > 4_096 -> 128
+      data.size > 1_024 -> 256
+      else -> 512
     }
     val interChunkMs = when {
-      data.size > 32_768 -> 140L
-      data.size > 8_192 -> 110L
-      else -> 70L
+      data.size > 16_384 -> 180L
+      data.size > 4_096 -> 130L
+      data.size > 1_024 -> 95L
+      else -> 55L
     }
     val postPrintMs = when {
-      data.size > 32_768 -> 1_200L
-      data.size > 8_192 -> 900L
-      data.size > 512 -> 500L
-      else -> 350L
+      data.size > 8_192 -> 1_000L
+      data.size > 2_048 -> 700L
+      data.size > 512 -> 450L
+      else -> 300L
     }
 
+    val totalChunks = (data.size + chunkSize - 1) / chunkSize
     var offset = 0
-    while (offset < data.size) {
-      val end = minOf(offset + chunkSize, data.size)
-      stream.write(data, offset, end - offset)
-      stream.flush()
-      offset = end
+    var chunkIndex = 0
 
-      if (offset < data.size) {
-        Thread.sleep(interChunkMs)
+    try {
+      while (offset < data.size) {
+        val end = minOf(offset + chunkSize, data.size)
+        stream.write(data, offset, end - offset)
+        stream.flush()
+        offset = end
+        chunkIndex++
+
+        if (chunkIndex == 1 || chunkIndex == totalChunks || chunkIndex % 25 == 0) {
+          Log.d(
+            TAG,
+            "BT chunk $chunkIndex/$totalChunks ($end/${data.size}B, chunk=$chunkSize delay=${interChunkMs}ms)"
+          )
+        }
+
+        if (offset < data.size) {
+          Thread.sleep(interChunkMs)
+        }
       }
+    } catch (e: IOException) {
+      Log.e(
+        TAG,
+        "BT write aborted at chunk $chunkIndex/$totalChunks offset=$offset/${data.size}B: ${e.message}"
+      )
+      throw e
     }
 
+    Log.d(TAG, "BT write complete: $totalChunks chunks, postPrintMs=$postPrintMs")
     Thread.sleep(postPrintMs)
   }
 
