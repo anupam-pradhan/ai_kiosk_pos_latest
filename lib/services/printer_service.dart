@@ -202,25 +202,34 @@ class PrinterService {
     try {
       _debugService.log('🖨️ Printing raw data...');
       _debugService.log(
-        '🧾 Raw print payload jobType=${jobType ?? 'raw'} copies=$copies '
+        '🧾 Raw print jobType=${jobType ?? 'raw'} copies=$copies '
         'base64Length=${base64Data.length} '
-        'receiptPayloadKeys=${receiptPayload?.keys.join(',') ?? 'none'}',
+        'hasReceiptPayload=${receiptPayload != null && receiptPayload.isNotEmpty}',
       );
-      final receiptJobType = jobType?.toLowerCase();
-      final suppressedReceiptPayload = receiptJobType != null && receiptJobType.startsWith('receipt')
-          ? null
-          : receiptPayload;
+      if (receiptPayload != null && receiptPayload.isNotEmpty) {
+        _debugService.log(
+          '🧾 receiptPayload order=${receiptPayload['orderNumber'] ?? receiptPayload['displayOrderNumber']} '
+          'items=${(receiptPayload['items'] as List?)?.length ?? 0}',
+        );
+      }
       final args = <String, dynamic>{
         'data': base64Data,
         'copies': copies,
         if (jobType != null && jobType.isNotEmpty) 'jobType': jobType,
-        if (suppressedReceiptPayload != null && suppressedReceiptPayload.isNotEmpty)
-          'receiptPayload': suppressedReceiptPayload,
+        if (receiptPayload != null && receiptPayload.isNotEmpty)
+          'receiptPayload': receiptPayload,
       };
+      final startedAt = DateTime.now();
       final result = await _channel.invokeMethod<dynamic>('printRaw', args);
+      final elapsedMs = DateTime.now().difference(startedAt).inMilliseconds;
       final ok = result is Map && result['ok'] == true;
       if (ok) {
-        _debugService.log('✅ Raw print complete');
+        _debugService.log('✅ Raw print complete (${elapsedMs}ms)');
+      } else {
+        _debugService.log(
+          '❌ Raw print failed (${elapsedMs}ms): '
+          '${result is Map ? (result['message'] ?? result['error'] ?? result['errorCode']) : result}',
+        );
       }
       if (result is Map) {
         return Map<String, dynamic>.from(result);

@@ -23,10 +23,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.sync.withLock
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Unified printer management layer.
@@ -55,6 +57,8 @@ class PrinterManager(private val context: Context) {
     private const val KEY_RESTAURANT_NAME = "restaurant_name"
     private const val KEY_RESTAURANT_ADDRESS = "restaurant_address"
     private const val KEY_RESTAURANT_PHONE = "restaurant_phone"
+    /** Drop redundant `handleAppResume()` calls fired within this window. */
+    private const val RESUME_DEBOUNCE_MS = 2_000L
   }
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -75,6 +79,24 @@ class PrinterManager(private val context: Context) {
   private var manualDisconnectRequested = false
   private var lastPrintFailureCode: String? = null
   private val printMutex = Mutex()
+  /**
+   * Serialises every connect/disconnect on the BT/USB/WiFi drivers so that
+   * the boot-time `autoReconnectLastPrinter`, the resume-time
+   * `handleAppResume`, the web `CONNECT_PRINTER` handler, and the
+   * print-time reconnect path can never race against each other. Without
+   * this lock, two coroutines each call `disconnect()` then `connect()`
+   * back-to-back, cross-tearing each other's partially established sockets
+   * and producing the "read failed, socket might closed" pair we see in
+   * logcat at app resume.
+   */
+  private val connectionMutex = Mutex()
+  /**
+   * Coalesces back-to-back `handleAppResume()` calls. `onResume` and the
+   * five permission callbacks (1001/1002/1003/1004/1005) all fan in to
+   * `handleAppResume`, and a single foregrounding event can fire it 3–6
+   * times in <100 ms. Within `RESUME_DEBOUNCE_MS` we keep only the first.
+   */
+  private val lastResumeHandledAt = AtomicLong(0L)
   @Volatile private var isPrinting = false
   @Volatile private var lastPrintFinishedAt = 0L
 
@@ -106,20 +128,26 @@ class PrinterManager(private val context: Context) {
     sendLog("🖨️ Auto-reconnecting to $name ($address)...")
 
     scope.launch(Dispatchers.IO) {
-      val success = when (type) {
-        "bluetooth" -> btDriver.connect(address)
-        "usb" -> usbDriver.connect(address)
-        "wifi" -> wifiDriver.connect(address)
-        "ethernet" -> wifiDriver.connect(address)
-        else -> false
+      val success = connectionMutex.withLock {
+        when (type) {
+          "bluetooth" -> connectBluetoothIfNeededLocked(address)
+          "usb" -> connectUsbIfNeeded(address)
+          "wifi" -> wifiDriver.connect(address)
+          "ethernet" -> wifiDriver.connect(address)
+          else -> false
+        }
       }
 
       if (success) {
         sendLog("✅ Auto-reconnected to $name")
         emitStatus()
       } else {
+        // Do NOT call `disconnectDrivers()` here. A concurrent print path
+        // or web `CONNECT_PRINTER` may have established the link while we
+        // were waiting on the connection mutex; tearing it down would
+        // immediately drop a healthy socket the user just made. The
+        // print-time reconnect path handles recovery on its own.
         sendLog("⚠️ Auto-reconnect to $name failed (will retry on print)")
-        disconnectDrivers()
         emitStatus()
       }
     }
@@ -130,12 +158,26 @@ class PrinterManager(private val context: Context) {
    * Verifies existing handles and quietly tries one reconnect to the saved printer.
    */
   fun handleAppResume() {
+    val now = System.currentTimeMillis()
+    val previous = lastResumeHandledAt.get()
+    if (now - previous < RESUME_DEBOUNCE_MS) {
+      // Permission callbacks (1001-1005) and `onResume` all fan in here.
+      // Keep only the first event inside the debounce window.
+      return
+    }
+    if (!lastResumeHandledAt.compareAndSet(previous, now)) {
+      // Lost the race to another handleAppResume — that one wins.
+      return
+    }
+
     scope.launch(Dispatchers.IO) {
-      val lost = disconnectIfConnectionLost("app resume")
-      if (currentStatusMap()["connected"] != true) {
-        reconnectLastPrinterQuietly()
-      } else if (!lost) {
-        emitStatus()
+      connectionMutex.withLock {
+        val lost = disconnectIfConnectionLost("app resume")
+        if (currentStatusMap()["connected"] != true) {
+          reconnectLastPrinterQuietlyLocked()
+        } else if (!lost) {
+          emitStatus()
+        }
       }
     }
   }
@@ -283,19 +325,23 @@ class PrinterManager(private val context: Context) {
           }
           return@launch
         }
-        val success = when (normalizedType) {
-          "bluetooth" -> btDriver.connect(address)
-          "usb" -> usbDriver.connect(address)
-          "wifi" -> wifiDriver.connect(address)
-          "ethernet" -> wifiDriver.connect(address)
-          else -> {
-            sendLog("❌ Unknown printer type: $normalizedType")
-            false
+        val success = connectionMutex.withLock {
+          when (normalizedType) {
+            "bluetooth" -> connectBluetoothIfNeededLocked(address)
+            "usb" -> connectUsbIfNeeded(address)
+            "wifi" -> connectWifiIfNeeded(address)
+            "ethernet" -> connectWifiIfNeeded(address)
+            else -> {
+              sendLog("❌ Unknown printer type: $normalizedType")
+              false
+            }
           }
         }
 
         if (success) {
-          disconnectDriversExcept(normalizedType)
+          // Tearing down rival transports must also run under the
+          // connection mutex so it can't fire mid-connect on another path.
+          connectionMutex.withLock { disconnectDriversExcept(normalizedType) }
           val connectedAddress = when (normalizedType) {
             "bluetooth" -> btDriver.connectedDeviceAddress ?: address
             "usb" -> usbDriver.connectedDeviceAddress ?: address
@@ -366,11 +412,17 @@ class PrinterManager(private val context: Context) {
    */
   fun disconnectPrinter(result: MethodChannel.Result) {
     manualDisconnectRequested = true
-    disconnectDrivers()
-    sendLog("🔌 Printer disconnected")
-    val status = currentStatusMap()
-    emitStatus(status)
-    result.success(mapOf("ok" to true, "status" to status))
+    scope.launch(Dispatchers.IO) {
+      connectionMutex.withLock {
+        disconnectDrivers()
+      }
+      sendLog("🔌 Printer disconnected")
+      val status = currentStatusMap()
+      emitStatus(status)
+      scope.launch(Dispatchers.Main) {
+        result.success(mapOf("ok" to true, "status" to status))
+      }
+    }
   }
 
   /**
@@ -563,48 +615,89 @@ class PrinterManager(private val context: Context) {
 
     scope.launch(Dispatchers.IO) {
       try {
+        val startedAt = System.currentTimeMillis()
         val decodedBytes = android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT)
         val decodedHasInit = hasEscPosInit(decodedBytes)
         val decodedHasCut = hasEscPosCut(decodedBytes)
+        val rasterCount = countGsRasterCommands(decodedBytes)
         val normalizedRawBytes = normalizeRawPrintBytes(decodedBytes, jobType)
-        val useNativeReceiptFallback = jobType?.startsWith("receipt") == true && receiptPayload != null
-        val bytes = if (useNativeReceiptFallback) {
-          sendLog("Debug native receipt fallback enabled; printing receiptPayload instead of raw web ESC/POS")
-          EscPosCommands.buildReceipt(receiptPayload.toStringKeyMap())
+        val printerType = normalizePrinterType(prefs.getString(KEY_LAST_PRINTER_TYPE, "") ?: "")
+        val isBluetoothJob = printerType == "bluetooth"
+        val preferNativeFallback =
+          jobType?.startsWith("receipt") == true &&
+            receiptPayload != null &&
+            (
+              rasterCount > 0 ||
+                decodedBytes.size > 4_096 ||
+                (isBluetoothJob && decodedBytes.size > 2_048)
+              )
+        val nativeChesterBytes = if (receiptPayload != null) {
+          EscPosCommands.buildChesterReceipt(receiptPayload.toStringKeyMap())
+        } else {
+          null
+        }
+        val bytes = if (preferNativeFallback && nativeChesterBytes != null) {
+          sendLog(
+            "Native Chester fallback: web=${decodedBytes.size}B raster=$rasterCount bt=$isBluetoothJob " +
+              "→ native=${nativeChesterBytes.size}B"
+          )
+          nativeChesterBytes
         } else {
           normalizedRawBytes
         }
+        val useNativeReceiptFallback = preferNativeFallback && nativeChesterBytes != null
         val normalizedChanged = bytes.size != decodedBytes.size
         val safeCopies = copies.coerceIn(1, 5)
+        val isDrawerKick = jobType == "drawer" || looksLikeCashDrawerKick(bytes)
         val label = if (jobType.isNullOrBlank()) {
-          "raw data"
+          if (isDrawerKick) "cash drawer pulse" else "raw data"
         } else {
-          "raw $jobType"
+          if (isDrawerKick) "cash drawer pulse" else "raw $jobType"
         }
         sendLog(
-          "Raw print debug: job=${jobType ?: "raw"} original=${decodedBytes.size}B normalized=${normalizedRawBytes.size}B effective=${bytes.size}B " +
+          "Raw print debug: job=${jobType ?: "raw"} original=${decodedBytes.size}B raster=$rasterCount " +
+            "normalized=${normalizedRawBytes.size}B effective=${bytes.size}B " +
             "changed=$normalizedChanged init=$decodedHasInit cut=$decodedHasCut " +
             "first=${bytePreview(decodedBytes, fromEnd = false)} last=${bytePreview(decodedBytes, fromEnd = true)} " +
             "payload=${receiptPayload != null} nativeFallback=$useNativeReceiptFallback"
         )
-        sendLog("Raw print commands: ${describeEscPosCommands(decodedBytes)}")
-        sendLog("Raw print text preview: ${rawTextPreview(decodedBytes)}")
+        sendLog("Raw print commands (web): ${describeEscPosCommands(decodedBytes)}")
+        sendLog("Raw print commands (effective): ${describeEscPosCommands(bytes)}")
+        sendLog("Raw print readable (web): ${rawTextPreview(decodedBytes)}")
+        sendLog("Raw print readable (effective): ${rawTextPreview(bytes)}")
+        sendLog(
+          "Raw print socket: bt=${btDriver.isConnectionHealthy} usb=${usbDriver.isConnectionHealthy} " +
+            "wifi=${wifiDriver.isConnectionHealthy}"
+        )
+        if (isDrawerKick) {
+          sendLog("Cash drawer command detected: ESC p pulse only; no paper output is expected")
+        }
         sendLog("\uD83D\uDDA8\uFE0F Printing $label (${bytes.size} bytes, $safeCopies copies)...")
 
         var allOk = true
         repeat(safeCopies) { i ->
           if (i > 0) delay(600)
-          if (!printBytes(bytes)) {
+          var copyOk = printBytes(bytes)
+          if (!copyOk && !useNativeReceiptFallback && nativeChesterBytes != null && receiptPayload != null) {
+            sendLog(
+              "Web ESC/POS failed; retrying copy ${i + 1} with native Chester (${nativeChesterBytes.size}B)"
+            )
+            copyOk = printBytes(nativeChesterBytes)
+          }
+          if (!copyOk) {
             allOk = false
             sendLog("❌ Raw print failed (copy ${i + 1})")
           }
         }
 
+        val elapsedMs = System.currentTimeMillis() - startedAt
         scope.launch(Dispatchers.Main) {
           if (allOk) {
-            sendLog("✅ Raw print complete ($safeCopies copies)")
+            sendLog("✅ Raw print complete ($safeCopies copies, ${elapsedMs}ms)")
             if (jobType?.startsWith("receipt") == true || jobType?.startsWith("kot") == true || jobType?.startsWith("summary") == true) {
               sendLog("Raw ${jobType} transport accepted; nativeFallback=$useNativeReceiptFallback")
+            } else if (isDrawerKick) {
+              sendLog("Cash drawer pulse sent; check DK cable/drawer port if drawer did not open")
             }
             result.success(mapOf(
               "ok" to true,
@@ -614,6 +707,7 @@ class PrinterManager(private val context: Context) {
           } else {
             val status = currentStatusMap()
             emitStatus(status)
+            sendLog("❌ Raw print failed after ${elapsedMs}ms (${bytes.size}B)")
             result.success(errorResponse(currentPrintFailureCode(), "Raw print failed", status))
           }
         }
@@ -638,74 +732,41 @@ class PrinterManager(private val context: Context) {
     return bytes
   }
 
-  private fun sanitizeReceiptBytes(bytes: ByteArray): ByteArray {
-    // Preserve safe receipt ESC/POS commands from the web builder while
-    // rejecting unsupported or binary flows.
-    val cleaned = mutableListOf<Byte>()
-    cleaned.addAll(byteArrayOf(0x1B, 0x40).toList())
-
+  private fun looksLikeCashDrawerKick(bytes: ByteArray): Boolean {
+    if (bytes.size < 5) return false
     var index = 0
-    while (index < bytes.size) {
-      val value = bytes[index].toInt() and 0xFF
-      if (value == 0x1B && index + 1 < bytes.size) {
-        val next = bytes[index + 1].toInt() and 0xFF
-        when (next) {
-          0x40, // ESC @
-          0x61, // ESC a n
-          0x45, // ESC E n
-          0x47, // ESC G n
-          0x4D, // ESC M n
-          0x21  // ESC ! n
-          -> {
-            cleaned.add(bytes[index])
-            cleaned.add(bytes[index + 1])
-            index += 2
-            continue
-          }
-        }
-        index += 1
-        if (index < bytes.size) index += 1
-        continue
+    while (index <= bytes.size - 5) {
+      if ((bytes[index].toInt() and 0xFF) == 0x1B &&
+          (bytes[index + 1].toInt() and 0xFF) == 0x70 &&
+          ((bytes[index + 2].toInt() and 0xFF) == 0x00 || (bytes[index + 2].toInt() and 0xFF) == 0x01)) {
+        return true
       }
+      index++
+    }
+    return false
+  }
 
-      if (value == 0x1D && index + 1 < bytes.size) {
-        val next = bytes[index + 1].toInt() and 0xFF
-        when (next) {
-          0x42 -> { // GS B n
-            if (index + 2 < bytes.size) {
-              cleaned.add(bytes[index])
-              cleaned.add(bytes[index + 1])
-              cleaned.add(bytes[index + 2])
-              index += 3
-              continue
-            }
-          }
-          0x56 -> { // GS V n
-            if (index + 2 < bytes.size) {
-              cleaned.add(bytes[index])
-              cleaned.add(bytes[index + 1])
-              cleaned.add(bytes[index + 2])
-              index += 3
-              continue
-            }
-          }
-        }
-        index += 1
-        if (index < bytes.size) index += 1
-        continue
-      }
-
-      when (value) {
-        0x0A -> cleaned.add(0x0A)
-        0x0D -> cleaned.add(0x0A)
-        in 0x20..0x7E -> cleaned.add(bytes[index])
-      }
-      index += 1
+  private fun sanitizeReceiptBytes(bytes: ByteArray): ByteArray {
+    val needsInit = !hasEscPosInit(bytes)
+    val needsCut = !hasEscPosCut(bytes)
+    if (!needsInit && !needsCut) {
+      return bytes
     }
 
-    // Ensure there is space at the end for the cutter / user to remove the paper.
-    repeat(4) { cleaned.add(0x0A) }
-    return cleaned.toByteArray()
+    val tail = ByteArrayOutputStream()
+    if (!needsInit) {
+      tail.write(bytes)
+    } else {
+      tail.write(byteArrayOf(0x1B, 0x40))
+      tail.write(bytes)
+    }
+    if (!needsCut) {
+      repeat(3) { tail.write(0x0A) }
+    } else {
+      repeat(5) { tail.write(0x0A) }
+      tail.write(byteArrayOf(0x1D, 0x56, 0x01))
+    }
+    return tail.toByteArray()
   }
 
   private fun hasEscPosInit(bytes: ByteArray): Boolean {
@@ -770,18 +831,34 @@ class PrinterManager(private val context: Context) {
   }
 
   private fun rawTextPreview(bytes: ByteArray): String {
-    val text = buildString {
-      for (byte in bytes) {
-        val value = byte.toInt() and 0xFF
-        when {
-          value == 0x0A -> append("\\n")
-          value in 0x20..0x7E -> append(value.toChar())
-          value >= 0x80 -> append('?')
-        }
-      }
-    }.replace(Regex("\\s+"), " ").trim()
+    val readable = extractReadableEscPosText(bytes)
+    return readable.take(320).ifBlank { "no readable receipt text" }
+  }
 
-    return text.take(240).ifBlank { "no printable text" }
+  /** Strip ESC/GS control bytes so logcat shows what should appear on paper. */
+  private fun extractReadableEscPosText(bytes: ByteArray): String {
+    val out = StringBuilder()
+    var index = 0
+    while (index < bytes.size) {
+      val value = bytes[index].toInt() and 0xFF
+      when {
+        value == 0x0A -> {
+          out.append('\n')
+          index++
+        }
+        value == 0x1B || value == 0x1D -> {
+          index += 2
+          if (index < bytes.size && bytes[index - 1] == 0x21.toByte()) index++
+        }
+        value == 0x10 -> index += 3
+        value in 0x20..0x7E -> {
+          out.append(value.toChar())
+          index++
+        }
+        else -> index++
+      }
+    }
+    return out.toString().replace(Regex("[ \\t]+"), " ").replace(Regex("\\n+"), "\n").trim()
   }
 
   private fun Map<*, *>.toStringKeyMap(): Map<String, Any?> {
@@ -812,8 +889,77 @@ class PrinterManager(private val context: Context) {
     }
   }
 
+  private fun countGsRasterCommands(bytes: ByteArray): Int {
+    var count = 0
+    var index = 0
+    while (index < bytes.size - 2) {
+      if (bytes[index] == 0x1D.toByte() && bytes[index + 1] == 0x76.toByte() && bytes[index + 2] == 0x30.toByte()) {
+        count++
+      }
+      index++
+    }
+    return count
+  }
+
+  /**
+   * Public BT connect — takes the connection mutex. Use this from any
+   * code path that is NOT already inside `connectionMutex.withLock`.
+   */
+  private suspend fun connectBluetoothIfNeeded(address: String): Boolean {
+    return connectionMutex.withLock { connectBluetoothIfNeededLocked(address) }
+  }
+
+  /**
+   * Internal BT connect — caller MUST already hold `connectionMutex`.
+   * Used by `autoReconnectLastPrinter`, `handleAppResume`,
+   * `connectPrinter`, and `printBytesLocked` to avoid double-locking.
+   */
+  private suspend fun connectBluetoothIfNeededLocked(address: String): Boolean {
+    if (
+      btDriver.isConnectionHealthy &&
+      btDriver.connectedDeviceAddress.equals(address, ignoreCase = true)
+    ) {
+      sendLog("ℹ️ Bluetooth already connected to $address — reusing socket (no reconnect)")
+      return true
+    }
+    sendLog("🔗 Opening Bluetooth socket to $address...")
+    return btDriver.connect(address)
+  }
+
+  private suspend fun connectUsbIfNeeded(address: String): Boolean {
+    if (
+      usbDriver.isConnectionHealthy &&
+      usbDriver.connectedDeviceAddress.equals(address, ignoreCase = true)
+    ) {
+      sendLog("ℹ️ USB already connected to $address — reusing handle")
+      return true
+    }
+    return usbDriver.connect(address)
+  }
+
+  private suspend fun connectWifiIfNeeded(address: String): Boolean {
+    if (
+      wifiDriver.isConnectionHealthy &&
+      wifiDriver.connectedDeviceAddress.equals(address, ignoreCase = true)
+    ) {
+      sendLog("ℹ️ Network printer already connected to $address — reusing socket")
+      return true
+    }
+    return wifiDriver.connect(address)
+  }
+
+  private fun isTransportHealthy(transport: String): Boolean {
+    return when (normalizePrinterType(transport)) {
+      "bluetooth" -> btDriver.isConnectionHealthy
+      "usb" -> usbDriver.isConnectionHealthy
+      "wifi", "ethernet" -> wifiDriver.isConnectionHealthy
+      else -> false
+    }
+  }
+
   private suspend fun printBytesLocked(data: ByteArray): Boolean {
     lastPrintFailureCode = null
+    val printStartedAt = System.currentTimeMillis()
 
     if (manualDisconnectRequested) {
       lastPrintFailureCode = "PRINTER_DISCONNECTED"
@@ -821,46 +967,52 @@ class PrinterManager(private val context: Context) {
       return false
     }
 
-    // Active transport — prefer last saved type when multiple could be open.
-    val lastType = normalizePrinterType(prefs.getString(KEY_LAST_PRINTER_TYPE, "") ?: "")
-    val tryOrder = when (lastType) {
-      "usb" -> listOf("usb", "bluetooth", "wifi")
-      "wifi", "ethernet" -> listOf("wifi", "bluetooth", "usb")
-      else -> listOf("bluetooth", "usb", "wifi")
-    }
+    val savedType = normalizePrinterType(prefs.getString(KEY_LAST_PRINTER_TYPE, "") ?: "")
+    val savedAddress = prefs.getString(KEY_LAST_PRINTER_ADDRESS, "") ?: ""
 
-    for (transport in tryOrder) {
-      sendLog("Trying ${transport.uppercase(Locale.US)} print (${data.size} bytes)")
-      val ok = printViaTransport(transport, data)
-      if (ok) {
-        sendLog("${transport.uppercase(Locale.US)} print accepted (${data.size} bytes)")
+    sendLog(
+      "🧾 Print start ${data.size}B | saved=$savedType/$savedAddress | " +
+        "btHealthy=${btDriver.isConnectionHealthy}@${btDriver.connectedDeviceAddress} " +
+        "usbHealthy=${usbDriver.isConnectionHealthy} wifiHealthy=${wifiDriver.isConnectionHealthy}"
+    )
+
+    if (savedType.isNotBlank() && isTransportHealthy(savedType)) {
+      sendLog("📤 Sending on existing $savedType connection (no reconnect)")
+      if (printViaTransport(savedType, data)) {
+        val elapsedMs = System.currentTimeMillis() - printStartedAt
+        sendLog("✅ Print ok on existing $savedType socket (${elapsedMs}ms)")
         return true
       }
+      sendLog("⚠️ Print failed on existing $savedType socket")
+    } else {
+      sendLog("ℹ️ No healthy $savedType socket — will reconnect once if address saved")
     }
 
-    // Reconnect once to the saved printer, then print again.
-    val lastAddress = prefs.getString(KEY_LAST_PRINTER_ADDRESS, null)
-    val savedType = normalizePrinterType(prefs.getString(KEY_LAST_PRINTER_TYPE, "") ?: "")
-
-    if (!lastAddress.isNullOrBlank() && savedType.isNotBlank()) {
-      sendLog("⟲ Auto-reconnecting to last printer...")
-      val reconnected = when (savedType) {
-        "bluetooth" -> btDriver.connect(lastAddress)
-        "usb" -> usbDriver.connect(lastAddress)
-        "wifi", "ethernet" -> wifiDriver.connect(lastAddress)
-        else -> false
+    if (savedAddress.isNotBlank() && savedType.isNotBlank()) {
+      sendLog("⟲ One reconnect attempt: $savedType $savedAddress")
+      val reconnected = connectionMutex.withLock {
+        when (savedType) {
+          "bluetooth" -> connectBluetoothIfNeededLocked(savedAddress)
+          "usb" -> connectUsbIfNeeded(savedAddress)
+          "wifi", "ethernet" -> connectWifiIfNeeded(savedAddress)
+          else -> false
+        }
       }
 
       if (reconnected) {
         emitStatus()
-        val ok = printViaTransport(savedType, data)
-        if (ok) return true
+        if (printViaTransport(savedType, data)) {
+          val elapsedMs = System.currentTimeMillis() - printStartedAt
+          sendLog("✅ Print ok after reconnect (${elapsedMs}ms)")
+          return true
+        }
         lastPrintFailureCode = "PRINTER_DISCONNECTED"
         reportPrintFailure("Print failed after reconnect")
+        sendLog("❌ Print still failed after reconnect (${data.size}B)")
         return false
       }
 
-      sendLog("⚠️ Auto-reconnect failed")
+      sendLog("⚠️ Reconnect failed for $savedType $savedAddress")
       lastPrintFailureCode = when (savedType) {
         "wifi", "ethernet" -> "NETWORK_UNREACHABLE"
         "usb" -> if (usbDriver.allPrinterPermissionsGranted) "PRINTER_DISCONNECTED" else "USB_PERMISSION_DENIED"
@@ -872,7 +1024,7 @@ class PrinterManager(private val context: Context) {
     }
 
     lastPrintFailureCode = "PRINTER_DISCONNECTED"
-    reportPrintFailure("No printer connected")
+    reportPrintFailure("No saved printer to print to")
     return false
   }
 
@@ -1032,7 +1184,13 @@ class PrinterManager(private val context: Context) {
     }
   }
 
+  /** Public — takes the connection mutex. */
   private suspend fun reconnectLastPrinterQuietly(): Boolean {
+    return connectionMutex.withLock { reconnectLastPrinterQuietlyLocked() }
+  }
+
+  /** Caller MUST already hold `connectionMutex`. */
+  private suspend fun reconnectLastPrinterQuietlyLocked(): Boolean {
     val lastAddress = prefs.getString(KEY_LAST_PRINTER_ADDRESS, null)
     val lastType = prefs.getString(KEY_LAST_PRINTER_TYPE, null)
     if (lastAddress.isNullOrBlank() || lastType.isNullOrBlank()) {
@@ -1044,12 +1202,10 @@ class PrinterManager(private val context: Context) {
       return false
     }
 
-    sendLog("⟲ Quiet reconnect to last printer...")
-    val reconnected = when (lastType) {
-      "bluetooth" -> btDriver.connect(lastAddress)
-      "usb" -> usbDriver.connect(lastAddress)
-      "wifi" -> wifiDriver.connect(lastAddress)
-      "ethernet" -> wifiDriver.connect(lastAddress)
+    val reconnected = when (normalizePrinterType(lastType)) {
+      "bluetooth" -> connectBluetoothIfNeededLocked(lastAddress)
+      "usb" -> connectUsbIfNeeded(lastAddress)
+      "wifi", "ethernet" -> connectWifiIfNeeded(lastAddress)
       else -> false
     }
     emitStatus()
@@ -1181,15 +1337,18 @@ class PrinterManager(private val context: Context) {
     scope.launch(Dispatchers.IO) {
       var lastEmittedStatus: Map<String, Any>? = null
       while (isActive) {
-        delay(3_000)
+        delay(20_000)
         if (!isActive) continue
-        if (disconnectIfConnectionLost("monitor")) {
+        // Mutex-guarded — never compete with a print/connect path.
+        val droppedSomething = connectionMutex.withLock {
+          disconnectIfConnectionLost("monitor")
+        }
+        if (droppedSomething) {
           lastEmittedStatus = currentStatusMap()
           continue
         }
         if (isPrintSettling()) continue
 
-        refreshHardwareStatus("monitor")
         val status = currentStatusMap()
         if (status != lastEmittedStatus) {
           emitStatus(status)
@@ -1250,8 +1409,10 @@ class PrinterManager(private val context: Context) {
             val address = device?.address
             if (btDriver.isConnected && (address == null || address == btDriver.connectedDeviceAddress)) {
               sendLog("⚠️ Bluetooth printer disconnected")
-              btDriver.disconnect()
-              emitStatus()
+              scope.launch(Dispatchers.IO) {
+                connectionMutex.withLock { btDriver.disconnect() }
+                emitStatus()
+              }
             }
           }
           BluetoothAdapter.ACTION_STATE_CHANGED -> {
@@ -1259,9 +1420,13 @@ class PrinterManager(private val context: Context) {
             if (state == BluetoothAdapter.STATE_OFF || state == BluetoothAdapter.STATE_TURNING_OFF) {
               if (btDriver.isConnected) {
                 sendLog("⚠️ Bluetooth turned off")
-                btDriver.disconnect()
+                scope.launch(Dispatchers.IO) {
+                  connectionMutex.withLock { btDriver.disconnect() }
+                  emitStatus()
+                }
+              } else {
+                emitStatus()
               }
-              emitStatus()
             } else if (state == BluetoothAdapter.STATE_ON) {
               emitStatus()
             }
