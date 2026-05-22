@@ -30,6 +30,7 @@ class BluetoothPrinterDriver(private val context: Context) {
 
   companion object {
     private const val TAG = "BtPrinter"
+    private const val ENABLE_BLUETOOTH_REALTIME_STATUS = false
     /** Standard SPP UUID for serial Bluetooth communication */
     private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
     /** Common Bluetooth device classes for printers */
@@ -63,6 +64,9 @@ class BluetoothPrinterDriver(private val context: Context) {
     get() = lastRealtimeStatus
 
   suspend fun refreshRealtimeStatus(reason: String = "poll"): Map<String, Any> = withContext(Dispatchers.IO) {
+    if (!ENABLE_BLUETOOTH_REALTIME_STATUS) {
+      return@withContext markRealtimeStatusDisabled(reason)
+    }
     if (!isConnectionHealthy) {
       return@withContext realtimeUnavailable(reason, "not_connected").also {
         lastRealtimeStatus = it
@@ -189,7 +193,12 @@ class BluetoothPrinterDriver(private val context: Context) {
         throw IOException("Bluetooth permission not granted")
       }
 
-      // Disconnect existing connection first
+      if (isConnectionHealthy && connectedDeviceAddress.equals(address, ignoreCase = true)) {
+        Log.d(TAG, "Already connected to $address; reusing existing Bluetooth socket")
+        return@withContext true
+      }
+
+      // Disconnect a different or stale connection first.
       disconnect()
 
       val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
@@ -286,7 +295,7 @@ class BluetoothPrinterDriver(private val context: Context) {
     try {
       writeChunks(stream, data)
       Log.i(TAG, "Print data sent: ${data.size} bytes ✅")
-      queryAndLogRealtimeStatus("after print")
+      markRealtimeStatusDisabled("after print")
       return@withContext true
     } catch (e: IOException) {
       Log.e(TAG, "Print failed: ${e.message}", e)
@@ -300,7 +309,7 @@ class BluetoothPrinterDriver(private val context: Context) {
             try {
               writeChunks(retryStream, data)
               Log.i(TAG, "Print retry succeeded: ${data.size} bytes ✅")
-              queryAndLogRealtimeStatus("after retry")
+              markRealtimeStatusDisabled("after retry")
               return@withContext true
             } catch (retryError: IOException) {
               Log.e(TAG, "Print retry failed: ${retryError.message}", retryError)
@@ -388,6 +397,13 @@ class BluetoothPrinterDriver(private val context: Context) {
 
     return buildRealtimeStatus(reason, statusBytes).also {
       lastRealtimeStatus = it
+    }
+  }
+
+  private fun markRealtimeStatusDisabled(reason: String): Map<String, Any> {
+    return realtimeUnavailable(reason, "bluetooth_realtime_status_disabled").also {
+      lastRealtimeStatus = it
+      Log.i(TAG, "Printer realtime status skipped ($reason): disabled for Bluetooth stability")
     }
   }
 

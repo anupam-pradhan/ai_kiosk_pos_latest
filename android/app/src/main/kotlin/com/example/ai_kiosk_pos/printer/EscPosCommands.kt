@@ -14,7 +14,7 @@ object EscPosCommands {
   // Constants
   // ═══════════════════════════════════════════════════════════
 
-  private const val LINE_WIDTH = 42  // Sunmi SM X200 80mm = 42 chars at Font A
+  private const val LINE_WIDTH = 48  // 80mm = 48 chars at Font A (match web builder)
 
   // ═══════════════════════════════════════════════════════════
   // ESC/POS Control Bytes

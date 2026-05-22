@@ -576,10 +576,11 @@ class PrinterManager(private val context: Context) {
         }
         val normalizedChanged = bytes.size != decodedBytes.size
         val safeCopies = copies.coerceIn(1, 5)
+        val isDrawerKick = jobType == "drawer" || looksLikeCashDrawerKick(bytes)
         val label = if (jobType.isNullOrBlank()) {
-          "raw data"
+          if (isDrawerKick) "cash drawer pulse" else "raw data"
         } else {
-          "raw $jobType"
+          if (isDrawerKick) "cash drawer pulse" else "raw $jobType"
         }
         sendLog(
           "Raw print debug: job=${jobType ?: "raw"} original=${decodedBytes.size}B normalized=${normalizedRawBytes.size}B effective=${bytes.size}B " +
@@ -589,6 +590,9 @@ class PrinterManager(private val context: Context) {
         )
         sendLog("Raw print commands: ${describeEscPosCommands(decodedBytes)}")
         sendLog("Raw print text preview: ${rawTextPreview(decodedBytes)}")
+        if (isDrawerKick) {
+          sendLog("Cash drawer command detected: ESC p pulse only; no paper output is expected")
+        }
         sendLog("\uD83D\uDDA8\uFE0F Printing $label (${bytes.size} bytes, $safeCopies copies)...")
 
         var allOk = true
@@ -605,6 +609,8 @@ class PrinterManager(private val context: Context) {
             sendLog("✅ Raw print complete ($safeCopies copies)")
             if (jobType?.startsWith("receipt") == true || jobType?.startsWith("kot") == true || jobType?.startsWith("summary") == true) {
               sendLog("Raw ${jobType} transport accepted; nativeFallback=$useNativeReceiptFallback")
+            } else if (isDrawerKick) {
+              sendLog("Cash drawer pulse sent; check DK cable/drawer port if drawer did not open")
             }
             result.success(mapOf(
               "ok" to true,
@@ -638,73 +644,46 @@ class PrinterManager(private val context: Context) {
     return bytes
   }
 
-  private fun sanitizeReceiptBytes(bytes: ByteArray): ByteArray {
-    // Preserve safe receipt ESC/POS commands from the web builder while
-    // rejecting unsupported or binary flows.
-    val cleaned = mutableListOf<Byte>()
-    cleaned.addAll(byteArrayOf(0x1B, 0x40).toList())
-
+  private fun looksLikeCashDrawerKick(bytes: ByteArray): Boolean {
+    if (bytes.size < 5) return false
     var index = 0
-    while (index < bytes.size) {
-      val value = bytes[index].toInt() and 0xFF
-      if (value == 0x1B && index + 1 < bytes.size) {
-        val next = bytes[index + 1].toInt() and 0xFF
-        when (next) {
-          0x40, // ESC @
-          0x61, // ESC a n
-          0x45, // ESC E n
-          0x47, // ESC G n
-          0x4D, // ESC M n
-          0x21  // ESC ! n
-          -> {
-            cleaned.add(bytes[index])
-            cleaned.add(bytes[index + 1])
-            index += 2
-            continue
-          }
-        }
-        index += 1
-        if (index < bytes.size) index += 1
-        continue
+    while (index <= bytes.size - 5) {
+      if ((bytes[index].toInt() and 0xFF) == 0x1B &&
+          (bytes[index + 1].toInt() and 0xFF) == 0x70 &&
+          ((bytes[index + 2].toInt() and 0xFF) == 0x00 || (bytes[index + 2].toInt() and 0xFF) == 0x01)) {
+        return true
       }
+      index++
+    }
+    return false
+  }
 
-      if (value == 0x1D && index + 1 < bytes.size) {
-        val next = bytes[index + 1].toInt() and 0xFF
-        when (next) {
-          0x42 -> { // GS B n
-            if (index + 2 < bytes.size) {
-              cleaned.add(bytes[index])
-              cleaned.add(bytes[index + 1])
-              cleaned.add(bytes[index + 2])
-              index += 3
-              continue
-            }
-          }
-          0x56 -> { // GS V n
-            if (index + 2 < bytes.size) {
-              cleaned.add(bytes[index])
-              cleaned.add(bytes[index + 1])
-              cleaned.add(bytes[index + 2])
-              index += 3
-              continue
-            }
-          }
-        }
-        index += 1
-        if (index < bytes.size) index += 1
-        continue
-      }
+  private fun sanitizeReceiptBytes(bytes: ByteArray): ByteArray {
+    // Relaxed safe mode for receipts: web controls formatting and must be
+    // trusted to produce valid ESC/POS. Pass through raster (GS v 0), cuts
+    // and ESC sequences intact while ensuring an INIT prefix and trailing
+    // feed + cutter so printers reliably advance paper.
+    val cleaned = mutableListOf<Byte>()
 
-      when (value) {
-        0x0A -> cleaned.add(0x0A)
-        0x0D -> cleaned.add(0x0A)
-        in 0x20..0x7E -> cleaned.add(bytes[index])
-      }
-      index += 1
+    // Ensure INIT at start
+    if (!hasEscPosInit(bytes)) {
+      cleaned.addAll(byteArrayOf(0x1B, 0x40).toList())
     }
 
+    // Copy original bytes unchanged so web can fully control ESC/GS commands
+    cleaned.addAll(bytes.toList())
+
     // Ensure there is space at the end for the cutter / user to remove the paper.
-    repeat(4) { cleaned.add(0x0A) }
+    repeat(5) { cleaned.add(0x0A) }
+
+    // Ensure a paper cut command exists (accept common partial/full forms).
+    if (!hasEscPosCut(cleaned.toByteArray())) {
+      // Add common partial cut sequence; some printers accept 0x00 (full) too.
+      cleaned.addAll(byteArrayOf(0x1D, 0x56, 0x01).toList())
+      cleaned.addAll(byteArrayOf(0x1D, 0x56, 0x00).toList())
+    }
+
+    // Return the unmodified payload (with ensured INIT and trailing cut)
     return cleaned.toByteArray()
   }
 
@@ -1181,7 +1160,7 @@ class PrinterManager(private val context: Context) {
     scope.launch(Dispatchers.IO) {
       var lastEmittedStatus: Map<String, Any>? = null
       while (isActive) {
-        delay(3_000)
+        delay(20_000)
         if (!isActive) continue
         if (disconnectIfConnectionLost("monitor")) {
           lastEmittedStatus = currentStatusMap()
@@ -1189,7 +1168,6 @@ class PrinterManager(private val context: Context) {
         }
         if (isPrintSettling()) continue
 
-        refreshHardwareStatus("monitor")
         val status = currentStatusMap()
         if (status != lastEmittedStatus) {
           emitStatus(status)
