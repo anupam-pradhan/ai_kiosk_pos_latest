@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/services.dart';
 
-import 'debug_log_service.dart';
+import '../debug_log_service.dart';
 
 class PrinterService {
   static final PrinterService _instance = PrinterService._internal();
@@ -104,14 +104,12 @@ class PrinterService {
     int copies = 1,
     String? jobId,
     String? jobType,
-    Map<String, dynamic>? receiptPayload,
   }) async {
     return _invoke('printerPrint', {
       'data': base64Data,
       'copies': copies,
       if (jobId != null && jobId.isNotEmpty) 'jobId': jobId,
       if (jobType != null && jobType.isNotEmpty) 'jobType': jobType,
-      if (receiptPayload != null) 'receiptPayload': receiptPayload,
     });
   }
 
@@ -147,65 +145,6 @@ class PrinterService {
         e.message ?? 'Bluetooth permission request failed',
       );
     }
-  }
-
-  Future<Map<String, dynamic>> openNativeSettings(String action) {
-    final target = switch (action) {
-      'OPEN_BLUETOOTH_SETTINGS' => 'bluetooth',
-      'OPEN_USB_SETTINGS' => 'usb',
-      _ => 'app',
-    };
-    return openPrinterSettings(target);
-  }
-
-  Future<List<Map<String, dynamic>>> scanPrinters() async {
-    final result = await scanPrintersDetailed();
-    final printers = result['printers'];
-    if (printers is List) {
-      return printers.map((p) => Map<String, dynamic>.from(p as Map)).toList();
-    }
-    return [];
-  }
-
-  Future<Map<String, dynamic>> connectPrinter(String address, String type) {
-    return savePrinter(address: address, printerType: type);
-  }
-
-  Future<Map<String, dynamic>> disconnectPrinter() {
-    return forgetPrinter();
-  }
-
-  Future<Map<String, dynamic>> testPrint() {
-    return testPrintResult();
-  }
-
-  Future<Map<String, dynamic>> printReceipt(
-    Map<String, dynamic> orderData, {
-    int? copies,
-  }) async {
-    return _failure(
-      'PRINTER_DEPRECATED',
-      'Native receipt formatting was removed. Use PRINTER_PRINT.',
-      status: await getPrinterStatus(),
-    );
-  }
-
-  Future<Map<String, dynamic>> printKot(Map<String, dynamic> orderData) async {
-    return _failure(
-      'PRINTER_DEPRECATED',
-      'Native KOT formatting was removed. Use PRINTER_PRINT.',
-      status: await getPrinterStatus(),
-    );
-  }
-
-  Future<Map<String, dynamic>> updateSettings({
-    bool? autoPrintEnabled,
-    int? printCopies,
-    String? restaurantName,
-    String? restaurantAddress,
-    String? restaurantPhone,
-  }) {
-    return getPrinterStatusResult();
   }
 
   Future<Map<String, dynamic>> _invoke(
