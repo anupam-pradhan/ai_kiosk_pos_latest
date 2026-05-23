@@ -49,6 +49,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   Timer? _retryTimer;
   int _retryCount = 0;
   StreamSubscription<Map<String, dynamic>>? _printerStatusSub;
+  StreamSubscription<Map<String, dynamic>>? _printerJobSub;
   StreamSubscription<bool>? _readerDisconnectSub;
   StreamSubscription<bool>? _readerConnectSub;
   String _lastPrewarmKey = '';
@@ -92,6 +93,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     if (AppConfig.isPrinterEnabled) {
       _printerStatusSub = _debugService.printerStatusStream.listen((status) {
         unawaited(_emitPrinterStatusToWeb(status));
+      });
+      _printerJobSub = _printerService.jobStream.listen((event) {
+        unawaited(_emitPrinterJobToWeb(event));
       });
       unawaited(_ensureBluetoothPrinterPermissionOnOpen());
     }
@@ -219,6 +223,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     WidgetsBinding.instance.removeObserver(this);
     _retryTimer?.cancel();
     _printerStatusSub?.cancel();
+    _printerJobSub?.cancel();
     _readerDisconnectSub?.cancel();
     _readerConnectSub?.cancel();
     super.dispose();
@@ -291,6 +296,18 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
     );
   }
 
+  Future<void> _emitPrinterJobToWeb(Map<String, dynamic> event) async {
+    final controller = _webViewController;
+    if (controller == null) return;
+    final normalized = Map<String, dynamic>.from(event);
+    normalized["status"] = _normalizePrinterStatus(_safeMap(event["status"]));
+    final jsonPayload = jsonEncode(normalized);
+    await controller.evaluateJavascript(
+      source:
+          "window.onPrinterJobChanged && window.onPrinterJobChanged($jsonPayload);",
+    );
+  }
+
   Future<void> _emitCurrentPrinterStatusToWeb() async {
     try {
       final status = await _printerService.getPrinterStatus();
@@ -303,6 +320,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
   Map<String, dynamic> _normalizePrinterStatus(Map<String, dynamic> status) {
     return {
       "connected": status["connected"] == true,
+      "state": status["state"]?.toString() ?? "",
       "name": status["name"]?.toString() ?? "",
       "address": status["address"]?.toString() ?? "",
       "type": status["type"]?.toString() ?? "",
@@ -329,7 +347,7 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
       "printerStatusCheckedAt": status["printerStatusCheckedAt"] is int
           ? status["printerStatusCheckedAt"] as int
           : int.tryParse(status["printerStatusCheckedAt"]?.toString() ?? "") ??
-              0,
+                0,
       "paperEnd": status["paperEnd"] == true,
       "paperNearEnd": status["paperNearEnd"] == true,
       "coverOpen": status["coverOpen"] == true,
@@ -345,6 +363,14 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
 
   bool _isPrinterCommand(dynamic type) {
     return const {
+      "PRINTER_STATUS",
+      "PRINTER_SCAN",
+      "PRINTER_SAVE",
+      "PRINTER_FORGET",
+      "PRINTER_TEST",
+      "PRINTER_PRINT",
+      "PRINTER_DRAWER",
+      "PRINTER_OPEN_SETTINGS",
       "PRINT_RECEIPT",
       "PRINT_KOT",
       "PRINT_RAW",
@@ -359,6 +385,19 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
       "OPEN_BLUETOOTH_SETTINGS",
       "OPEN_APP_SETTINGS",
       "OPEN_USB_SETTINGS",
+    }.contains(type);
+  }
+
+  bool _isPrinterV2Command(dynamic type) {
+    return const {
+      "PRINTER_STATUS",
+      "PRINTER_SCAN",
+      "PRINTER_SAVE",
+      "PRINTER_FORGET",
+      "PRINTER_TEST",
+      "PRINTER_PRINT",
+      "PRINTER_DRAWER",
+      "PRINTER_OPEN_SETTINGS",
     }.contains(type);
   }
 
@@ -1405,6 +1444,17 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                         return _printerDisabledResponse();
                       }
 
+                      if (_isPrinterV2Command(type)) {
+                        final result = await _printerService.handleWebCommand(
+                          Map<String, dynamic>.from(payload),
+                        );
+                        final status = _safeMap(result["status"]);
+                        if (status.isNotEmpty) {
+                          unawaited(_emitPrinterStatusToWeb(status));
+                        }
+                        return result;
+                      }
+
                       if (type == "PRINT_RECEIPT") {
                         try {
                           final orderData = Map<String, dynamic>.from(payload);
@@ -1523,7 +1573,8 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                           final receiptPayload = _safeMap(
                             payload["receiptPayload"],
                           );
-                          final jobType = payload["jobType"]?.toString() ?? "raw";
+                          final jobType =
+                              payload["jobType"]?.toString() ?? "raw";
                           _debugService.log(
                             'PRINT_RAW request received from WebView: '
                             'jobType=$jobType copies=$copies '
@@ -1549,8 +1600,9 @@ class _KioskWebViewScreenState extends State<KioskWebViewScreen>
                             base64Data,
                             copies: copies,
                             jobType: jobType,
-                            receiptPayload:
-                                receiptPayload.isNotEmpty ? receiptPayload : null,
+                            receiptPayload: receiptPayload.isNotEmpty
+                                ? receiptPayload
+                                : null,
                           );
                           final status = _safeMap(result["status"]);
                           final normalizedStatus = status.isNotEmpty

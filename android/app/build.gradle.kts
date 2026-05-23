@@ -92,4 +92,6 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // Kotlin coroutines for structured async
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // Printer v2 transport: Bluetooth Classic/SPP, USB, and raw TCP ESC/POS.
+    implementation("com.github.DantSu:ESCPOS-ThermalPrinter-Android:3.3.0")
 }
